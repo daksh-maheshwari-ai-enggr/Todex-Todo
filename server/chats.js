@@ -19,7 +19,9 @@ function validateBotId(botId, userId) {
 // Create a new chat
 export async function createChat(userId, botId, title) {
   const validatedData = validateChatData({ title });
-  const bot = botId ? await prisma.bot.findUnique({ where: { id: botId } }) : null;
+  const bot = botId ? await prisma.bot.findUnique({
+    where: { id: botId, userId: userId } // Ensure bot belongs to the user
+  }) : null;
 
   if (!bot && botId) {
     throw new Error("Bot not found or does not belong to the authenticated user.");

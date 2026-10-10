@@ -53,13 +53,19 @@ model Chat {
   @@index([botId])
 }
 
+enum MessageRole {
+  USER
+  ASSISTANT
+  TOOL
+}
+
 model Message {
   id          String    @id @default(cuid())
   chatId      String
   chat        Chat      @relation("ChatMessages", fields: [chatId], references: [id])
   senderId    String
   sender      User      @relation("UserMessages", fields: [senderId], references: [id])
-  role        String    @enum(["user", "assistant", "tool"])
+  role        MessageRole
   content     String    @db.VarChar(4000)
   createdAt   DateTime  @default(now())
   isRead      Boolean   @default(false)

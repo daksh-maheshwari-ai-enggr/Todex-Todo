@@ -1,4 +1,5 @@
 import { prisma } from "../prisma.js";
+import { requireAuth } from "../middleware/auth.js";
 
 // Helper function to validate message data
 function validateMessageData(data) {
@@ -21,6 +22,18 @@ function validateMessageData(data) {
 // Create a new message
 export async function createMessage(chatId, senderId, role, content) {
   const validatedData = validateMessageData({ content, role });
+
+  // Verify chat ownership
+  const chat = await prisma.chat.findUnique({
+    where: {
+      id: chatId,
+      userId: senderId, // Only allow messages from users who own the chat
+    },
+  });
+
+  if (!chat) {
+    throw new Error("Chat not found or does not belong to the sender.");
+  }
 
   return prisma.message.create({
     data: {
