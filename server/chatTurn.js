@@ -1,6 +1,7 @@
 import { prisma } from "./prisma.js";
 import { generateAgentResponse } from "./agent.js";
 import { createMessage, createAssistantMessage } from "./messages.js";
+import { loadConversationContext } from "./memory.js";
 
 // Execute one complete authenticated chat turn:
 //   1. persist the user's message
@@ -14,12 +15,13 @@ export async function runChatTurn({ bot, chat, userId, message }) {
   // 1. Persist the user message first. createMessage enforces the USER role.
   const userMessage = await createMessage(chat.id, userId, "user", message);
 
-  // 2. Load the full history for the chat. It already contains the message we
-  //    just saved; the agent de-duplicates it against the current message.
-  const conversationHistory = await prisma.message.findMany({
-    where: { chatId: chat.id },
-    orderBy: { createdAt: "asc" },
-    select: { role: true, content: true },
+  // 2. Load a bounded, chronological slice of the chat's history as agent
+  //    context. It includes the message we just saved; the agent de-duplicates
+  //    it against the current message. The full history is still persisted and
+  //    remains the source of truth (trimming only affects what the model sees).
+  const conversationHistory = await loadConversationContext({
+    chatId: chat.id,
+    userId,
   });
 
   // 3. Generate. On any generation failure, keep the saved user message and

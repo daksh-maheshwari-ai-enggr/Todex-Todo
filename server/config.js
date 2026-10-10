@@ -23,4 +23,8 @@ export const config = {
     baseUrl: optional("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
     timeoutMs: Number(process.env.OPENROUTER_TIMEOUT_MS) || 30000,
   },
+  memory: {
+    // Maximum number of recent messages loaded as agent context for a turn.
+    maxHistoryMessages: Number(process.env.MEMORY_MAX_HISTORY_MESSAGES) || 30,
+  },
 };
