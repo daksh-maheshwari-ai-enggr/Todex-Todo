@@ -38,4 +38,21 @@ export const config = {
     timeoutMs: Number(process.env.HANDOFF_TIMEOUT_MS) || 60000,
     maxTaskLength: Number(process.env.HANDOFF_MAX_TASK_LENGTH) || 2000,
   },
+  daytona: {
+    // Credentials stay server-side. Optional so the app boots without Daytona.
+    apiKey: optional("DAYTONA_API_KEY", null),
+    apiUrl: optional("DAYTONA_API_URL", null),
+    target: optional("DAYTONA_TARGET", null),
+    language: optional("DAYTONA_SANDBOX_LANGUAGE", "python"),
+    createTimeoutSec: Number(process.env.DAYTONA_CREATE_TIMEOUT_SEC) || 60,
+    execTimeoutSec: Number(process.env.DAYTONA_EXEC_TIMEOUT_SEC) || 30,
+    commandMaxLength: Number(process.env.DAYTONA_COMMAND_MAX_LENGTH) || 2000,
+    pathMaxLength: Number(process.env.DAYTONA_PATH_MAX_LENGTH) || 1024,
+    outputMaxBytes: Number(process.env.DAYTONA_OUTPUT_MAX_BYTES) || 8000,
+    fileReadMaxBytes: Number(process.env.DAYTONA_FILE_READ_MAX_BYTES) || 50000,
+    fileWriteMaxBytes: Number(process.env.DAYTONA_FILE_WRITE_MAX_BYTES) || 50000,
+    listMaxEntries: Number(process.env.DAYTONA_LIST_MAX_ENTRIES) || 200,
+    // Relative directory inside the sandbox work dir reserved for file tools.
+    workspaceDir: optional("DAYTONA_WORKSPACE_DIR", "workspace"),
+  },
 };

@@ -4,6 +4,12 @@ import {
   todoUpdateTool,
   todoDeleteTool,
 } from "./todo.js";
+import {
+  sandboxListFilesTool,
+  sandboxReadFileTool,
+  sandboxWriteFileTool,
+  sandboxExecuteCommandTool,
+} from "./sandbox.js";
 
 // Central tool registry. Add new tools here to make them available to the
 // agent; the graph binds whatever this module exports. Each tool declares its
@@ -14,6 +20,10 @@ export const tools = [
   todoListTool,
   todoUpdateTool,
   todoDeleteTool,
+  sandboxListFilesTool,
+  sandboxReadFileTool,
+  sandboxWriteFileTool,
+  sandboxExecuteCommandTool,
 ];
 
 export default tools;
