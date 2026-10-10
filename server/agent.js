@@ -9,7 +9,9 @@ import {
 import { createChatModel } from "./openrouter.js";
 import { config } from "./config.js";
 import { tools } from "./tools/registry.js";
+import { createHandoffTool } from "./tools/handoff.js";
 import { startToolExecution, finishToolExecution } from "./toolExecutions.js";
+import { createHandoff, finishHandoff } from "./handoffs.js";
 
 // Maximum length of a single inbound user message. Kept in sync with the
 // Message.content column limit in prisma/schema.prisma.
@@ -27,6 +29,9 @@ const AgentState = Annotation.Root({
   // never derived from model output or tool arguments.
   userId: Annotation({ reducer: (_, next) => next, default: () => null }),
   chatId: Annotation({ reducer: (_, next) => next, default: () => null }),
+  botId: Annotation({ reducer: (_, next) => next, default: () => null }),
+  // Teammates that may participate in this chat (trusted, server-resolved).
+  participants: Annotation({ reducer: (_, next) => next, default: () => [] }),
   botJob: Annotation({ reducer: (_, next) => next, default: () => "" }),
   botInstructions: Annotation({ reducer: (_, next) => next, default: () => "" }),
   conversationHistory: Annotation({
@@ -44,15 +49,29 @@ const AgentState = Annotation.Root({
 
 // Build the model once and reuse it (and the compiled graph) across requests.
 const chatModel = createChatModel();
-const modelWithTools = chatModel.bindTools(tools);
-const toolNode = new ToolNode(tools);
 
-export function buildSystemPrompt(botJob, botInstructions) {
+// The handoff tool delegates to another teammate via the runner below. The
+// runner is injected as a function reference (no circular import) and receives
+// only trusted, server-resolved context.
+const handoffTool = createHandoffTool({ runTeammate: runTeammateAgent });
+const allTools = [...tools, handoffTool];
+const modelWithTools = chatModel.bindTools(allTools);
+const toolNode = new ToolNode(allTools);
+
+export function buildSystemPrompt(botJob, botInstructions, participants = [], botId = null) {
+  const teammates = (participants || []).filter((p) => p && p.id !== botId);
+  const teammateList = teammates
+    .map((t) => `- ${t.name} (id: ${t.id}) — ${t.job}`)
+    .join("\n");
+
   return [
     botJob ? `Your job: ${botJob}` : "",
     botInstructions ? `Instructions:\n${botInstructions}` : "",
     "You are an assistant that responds to user messages in the context of the bot's job and instructions. Respond as concisely as possible.",
     "You may call the available tools to manage the user's tasks. Only call a tool when it is genuinely needed, and use the results to answer.",
+    teammateList
+      ? `You can delegate work to these teammates by calling handoff_to_teammate with the teammate id and a clear task:\n${teammateList}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -86,7 +105,9 @@ function historyToMessages(history) {
 // the current user message (without adding the current message twice).
 function buildInitialMessages(state) {
   const messages = [
-    new SystemMessage(buildSystemPrompt(state.botJob, state.botInstructions)),
+    new SystemMessage(
+      buildSystemPrompt(state.botJob, state.botInstructions, state.participants, state.botId),
+    ),
     ...historyToMessages(state.conversationHistory),
   ];
 
@@ -231,34 +252,170 @@ function extractFinalResponse(messages) {
   return "";
 }
 
-// Execute the agent workflow. Kept separate from Express route handling so the
-// transport layer only deals with HTTP concerns. `userId` is trusted context
-// supplied by the authenticated request, not by the model.
-export async function generateAgentResponse({
+// A per-request budget shared across the whole handoff chain so that limits
+// apply to all teammate executions, not just one invocation.
+function createExecutionBudget() {
+  return {
+    executions: 0,
+    maxExecutions: config.handoffs.maxExecutionsPerRequest,
+    maxDepth: config.handoffs.maxDepth,
+    deadline: Date.now() + config.handoffs.timeoutMs,
+  };
+}
+
+// Invoke the compiled graph once with fully server-resolved context. The
+// handoff tool reads its trusted context from `configurable`.
+async function invokeGraph({
   userId,
   chatId,
+  botId,
   botJob,
   botInstructions,
   conversationHistory = [],
   message,
-  timeoutMs = config.openRouter.timeoutMs,
+  participants = [],
+  depth = 0,
+  budget,
+  signal,
+}) {
+  const result = await agentGraph.invoke(
+    {
+      userId,
+      chatId,
+      botId,
+      botJob,
+      botInstructions,
+      conversationHistory,
+      message,
+      participants,
+    },
+    {
+      signal,
+      recursionLimit: GRAPH_RECURSION_LIMIT,
+      configurable: {
+        userId,
+        chatId,
+        botId,
+        participants,
+        depth,
+        budget,
+        runTeammate: runTeammateAgent,
+        signal,
+      },
+    },
+  );
+
+  return extractFinalResponse(result.messages);
+}
+
+async function safelyFinishHandoff(id, status, result, error) {
+  try {
+    await finishHandoff({ id, status, result, error });
+  } catch (persistError) {
+    console.warn("Failed to record handoff result:", persistError?.message);
+  }
+}
+
+// Execute a delegated teammate: persist the handoff, run the destination bot
+// with its own job/instructions and only the delegated task as context, then
+// record the outcome. Errors are recorded and rethrown so the initiating
+// teammate receives the failure instead of a fabricated success.
+async function runTeammateAgent({
+  userId,
+  chatId,
+  fromBotId,
+  toBot,
+  task,
+  depth = 0,
+  budget,
+  participants = [],
+  signal,
+}) {
+  if (budget) {
+    budget.executions += 1;
+  }
+
+  let record = null;
+  try {
+    record = await createHandoff({
+      chatId,
+      userId,
+      fromBotId,
+      toBotId: toBot.id,
+      task,
+      depth: depth + 1,
+    });
+  } catch (error) {
+    // Recording failure must not abort the delegation, but it is never
+    // reported as recorded. Only the message is logged.
+    console.warn("Failed to record handoff start:", error?.message);
+  }
+
+  try {
+    const result = await invokeGraph({
+      userId,
+      chatId,
+      botId: toBot.id,
+      botJob: toBot.job,
+      botInstructions: toBot.instructions || "",
+      conversationHistory: [],
+      message: task,
+      participants,
+      depth: depth + 1,
+      budget,
+      signal,
+    });
+
+    if (!result || result.trim().length === 0) {
+      throw new Error("The teammate returned an empty response.");
+    }
+
+    if (record) {
+      await safelyFinishHandoff(record.id, "SUCCEEDED", result, null);
+    }
+
+    return { ok: true, teammate: toBot.name, result };
+  } catch (error) {
+    if (record) {
+      await safelyFinishHandoff(record.id, "FAILED", null, error?.message);
+    }
+    throw error;
+  }
+}
+
+// Execute the agent workflow. Kept separate from Express route handling so the
+// transport layer only deals with HTTP concerns. `userId`, `chatId`, `botId`
+// and `participants` are trusted context supplied by the authenticated request,
+// not by the model.
+export async function generateAgentResponse({
+  userId,
+  chatId,
+  botId = null,
+  botJob,
+  botInstructions,
+  conversationHistory = [],
+  message,
+  participants = [],
+  timeoutMs = config.handoffs.timeoutMs,
 }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const budget = createExecutionBudget();
 
   try {
-    const result = await agentGraph.invoke(
-      {
-        userId,
-        chatId,
-        botJob,
-        botInstructions,
-        conversationHistory,
-        message,
-      },
-      { signal: controller.signal, recursionLimit: GRAPH_RECURSION_LIMIT },
-    );
-    return extractFinalResponse(result.messages);
+    return await invokeGraph({
+      userId,
+      chatId,
+      botId,
+      botJob,
+      botInstructions,
+      conversationHistory,
+      message,
+      participants,
+      depth: 0,
+      budget,
+      signal: controller.signal,
+    });
   } finally {
     clearTimeout(timer);
   }

@@ -19,6 +19,7 @@ model User {
   messages    Message[] @relation("UserMessages")
   todos       Todo[]    @relation("UserTodos")
   toolExecutions ToolExecution[] @relation("UserToolExecutions")
+  handoffs    Handoff[] @relation("UserHandoffs")
 
   @@index([email])
 }
@@ -35,6 +36,10 @@ model Bot {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   chats        Chat[]   @relation("BotChats")
+  messages     Message[] @relation("BotMessages")
+  chatParticipants ChatParticipant[] @relation("BotChatParticipants")
+  handoffsFrom Handoff[] @relation("HandoffFrom")
+  handoffsTo   Handoff[] @relation("HandoffTo")
 
   @@index([userId])
   @@index([id])
@@ -51,6 +56,8 @@ model Chat {
   updatedAt   DateTime  @updatedAt
   messages    Message[] @relation("ChatMessages")
   toolExecutions ToolExecution[] @relation("ChatToolExecutions")
+  participants ChatParticipant[] @relation("ChatParticipants")
+  handoffs    Handoff[] @relation("ChatHandoffs")
 
   @@index([userId])
   @@index([botId])
@@ -70,11 +77,16 @@ model Message {
   sender      User      @relation("UserMessages", fields: [senderId], references: [id], onDelete: Cascade)
   role        MessageRole
   content     String    @db.VarChar(4000)
+  // Which AI teammate produced an assistant message. Null for user messages
+  // and for legacy/assistant messages that predate teammate attribution.
+  botId       String?
+  bot         Bot?      @relation("BotMessages", fields: [botId], references: [id], onDelete: SetNull)
   createdAt   DateTime  @default(now())
   isRead      Boolean   @default(false)
 
   @@index([chatId])
   @@index([senderId])
+  @@index([botId])
 }
 
 model Todo {
@@ -117,4 +129,52 @@ model ToolExecution {
   @@unique([chatId, toolCallId])
   @@index([chatId])
   @@index([userId])
+}
+
+model ChatParticipant {
+  id        String   @id @default(cuid())
+  chatId    String
+  chat      Chat     @relation("ChatParticipants", fields: [chatId], references: [id], onDelete: Cascade)
+  botId     String
+  bot       Bot      @relation("BotChatParticipants", fields: [botId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([chatId, botId])
+  @@index([chatId])
+  @@index([botId])
+}
+
+enum HandoffStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+model Handoff {
+  id          String        @id @default(cuid())
+  chatId      String
+  chat        Chat          @relation("ChatHandoffs", fields: [chatId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User          @relation("UserHandoffs", fields: [userId], references: [id], onDelete: Cascade)
+  fromBotId   String
+  fromBot     Bot           @relation("HandoffFrom", fields: [fromBotId], references: [id], onDelete: Cascade)
+  toBotId     String
+  toBot       Bot           @relation("HandoffTo", fields: [toBotId], references: [id], onDelete: Cascade)
+  parentId    String?
+  parent      Handoff?      @relation("HandoffChain", fields: [parentId], references: [id], onDelete: SetNull)
+  children    Handoff[]     @relation("HandoffChain")
+  depth       Int           @default(0)
+  task        String        @db.VarChar(2000)
+  status      HandoffStatus @default(PENDING)
+  result      String?       @db.VarChar(4000)
+  error       String?       @db.VarChar(2000)
+  createdAt   DateTime      @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  @@index([chatId])
+  @@index([userId])
+  @@index([fromBotId])
+  @@index([toBotId])
 }

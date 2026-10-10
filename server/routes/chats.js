@@ -2,10 +2,14 @@ import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
 import {
   createChat,
+  createGroupChat,
   findChatsByUserId,
   findChatByIdAndUserId,
   updateChat,
   deleteChat,
+  listParticipants,
+  addParticipant,
+  removeParticipant,
 } from "../chats.js";
 
 const router = Router();
@@ -19,11 +23,15 @@ function sendError(res, error, fallbackMessage) {
   return res.status(500).json({ error: fallbackMessage });
 }
 
+// Create a chat. A `botIds` array creates a group chat with teammate
+// participants; a single `botId` creates (or omits) a direct chat as before.
 router.post("/", requireAuth, async (req, res) => {
-  const { botId, title } = req.body || {}
+  const { botId, botIds, title } = req.body || {}
 
   try {
-    const chat = await createChat(req.user.id, botId, title);
+    const chat = Array.isArray(botIds)
+      ? await createGroupChat(req.user.id, title, botIds)
+      : await createChat(req.user.id, botId, title);
     res.status(201).json({ chat });
   } catch (error) {
     sendError(res, error, "Failed to create chat.");
@@ -87,6 +95,55 @@ router.delete("/:chatId", requireAuth, async (req, res) => {
     res.status(204).send();
   } catch (error) {
     sendError(res, error, "Failed to delete chat.");
+  }
+});
+
+// List a chat's teammate participants.
+router.get("/:chatId/participants", requireAuth, async (req, res) => {
+  const { chatId } = req.params;
+
+  if (!chatId || typeof chatId !== "string") {
+    return res.status(400).json({ error: "Invalid chat ID" });
+  }
+
+  try {
+    const participants = await listParticipants(chatId, req.user.id);
+    res.json({ participants });
+  } catch (error) {
+    sendError(res, error, "Failed to fetch participants.");
+  }
+});
+
+// Add an owned bot as a participant of a group chat.
+router.post("/:chatId/participants", requireAuth, async (req, res) => {
+  const { chatId } = req.params;
+  const { botId } = req.body || {};
+
+  if (!chatId || typeof chatId !== "string") {
+    return res.status(400).json({ error: "Invalid chat ID" });
+  }
+
+  try {
+    const participant = await addParticipant(chatId, req.user.id, botId);
+    res.status(201).json({ participant });
+  } catch (error) {
+    sendError(res, error, "Failed to add participant.");
+  }
+});
+
+// Remove a participant from a group chat.
+router.delete("/:chatId/participants/:botId", requireAuth, async (req, res) => {
+  const { chatId, botId } = req.params;
+
+  if (!chatId || typeof chatId !== "string" || !botId || typeof botId !== "string") {
+    return res.status(400).json({ error: "Invalid chat or bot ID" });
+  }
+
+  try {
+    await removeParticipant(chatId, req.user.id, botId);
+    res.status(204).send();
+  } catch (error) {
+    sendError(res, error, "Failed to remove participant.");
   }
 });
 

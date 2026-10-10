@@ -3,6 +3,7 @@ import { requireAuth } from "../middleware/auth.js";
 import { prisma } from "../prisma.js";
 import { MAX_MESSAGE_LENGTH } from "../agent.js";
 import { runChatTurn } from "../chatTurn.js";
+import { getChatParticipantsForAgent } from "../chats.js";
 
 const router = Router();
 
@@ -39,6 +40,7 @@ router.post("/:botId/respond", requireAuth, async (req, res) => {
   // Load the bot and chat and verify ownership before any write happens.
   let bot;
   let chat;
+  let participants = [];
 
   try {
     bot = await prisma.bot.findFirst({
@@ -49,13 +51,27 @@ router.post("/:botId/respond", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Bot not found." });
     }
 
-    // The chat must belong to the user AND be associated with this bot.
+    // The chat must belong to the user.
     chat = await prisma.chat.findFirst({
       where: { id: chatId, userId: req.user.id },
     });
 
-    if (!chat || chat.botId !== botId) {
-      return res.status(404).json({ error: "Chat not found or does not belong to this bot." });
+    if (!chat) {
+      return res.status(404).json({ error: "Chat not found or does not belong to the authenticated user." });
+    }
+
+    if (chat.botId) {
+      // Direct chat: the requested bot must be this chat's bot.
+      if (chat.botId !== botId) {
+        return res.status(404).json({ error: "Chat not found or does not belong to this bot." });
+      }
+      participants = [bot];
+    } else {
+      // Group chat: the requested bot must be a participant.
+      participants = await getChatParticipantsForAgent(chat);
+      if (!participants.some((p) => p.id === botId)) {
+        return res.status(404).json({ error: "Bot is not a participant in this chat." });
+      }
     }
   } catch (error) {
     console.error("Error loading agent context:", error?.message);
@@ -70,6 +86,7 @@ router.post("/:botId/respond", requireAuth, async (req, res) => {
       chat,
       userId: req.user.id,
       message,
+      participants,
     });
 
     return res.status(201).json({

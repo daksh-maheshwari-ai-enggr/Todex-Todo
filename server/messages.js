@@ -72,7 +72,8 @@ export async function createMessage(chatId, senderId, role, content) {
 // intentionally not reachable from any public route: ASSISTANT/TOOL messages
 // must never be creatable from client input. Assistant replies are stored
 // against the authenticated chat owner because Message.senderId references User.
-export async function createAssistantMessage(chatId, senderId, content) {
+// `botId` optionally attributes the reply to the teammate that produced it.
+export async function createAssistantMessage(chatId, senderId, content, botId = null) {
   if (typeof content !== "string" || content.trim().length === 0) {
     throw httpError(400, "Assistant content must be a non-empty string.");
   }
@@ -87,6 +88,7 @@ export async function createAssistantMessage(chatId, senderId, content) {
       senderId,
       role: "ASSISTANT",
       content: content.trim(),
+      botId: botId || null,
     },
   });
 }

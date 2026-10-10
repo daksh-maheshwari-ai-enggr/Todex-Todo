@@ -11,7 +11,7 @@ import { loadConversationContext } from "./memory.js";
 //
 // Kept separate from the Express route and from the agent/graph itself. The
 // caller is responsible for validating ownership of the bot and chat.
-export async function runChatTurn({ bot, chat, userId, message }) {
+export async function runChatTurn({ bot, chat, userId, message, participants = [] }) {
   // 1. Persist the user message first. createMessage enforces the USER role.
   const userMessage = await createMessage(chat.id, userId, "user", message);
 
@@ -31,6 +31,8 @@ export async function runChatTurn({ bot, chat, userId, message }) {
     response = await generateAgentResponse({
       userId,
       chatId: chat.id,
+      botId: bot.id,
+      participants,
       botJob: bot.job,
       botInstructions: bot.instructions || "",
       conversationHistory,
@@ -51,7 +53,7 @@ export async function runChatTurn({ bot, chat, userId, message }) {
 
   // 4. Persist the assistant reply only after successful generation, then mark
   //    the turn complete by touching the chat's updatedAt.
-  const assistantMessage = await createAssistantMessage(chat.id, userId, response);
+  const assistantMessage = await createAssistantMessage(chat.id, userId, response, bot.id);
 
   await prisma.chat.update({
     where: { id: chat.id },

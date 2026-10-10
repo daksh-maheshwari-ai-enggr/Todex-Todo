@@ -27,4 +27,15 @@ export const config = {
     // Maximum number of recent messages loaded as agent context for a turn.
     maxHistoryMessages: Number(process.env.MEMORY_MAX_HISTORY_MESSAGES) || 30,
   },
+  groupChats: {
+    // Maximum number of teammate participants allowed per group chat.
+    maxParticipants: Number(process.env.GROUP_CHAT_MAX_PARTICIPANTS) || 10,
+  },
+  handoffs: {
+    // Safety limits applied across a whole handoff chain, not per teammate.
+    maxDepth: Number(process.env.HANDOFF_MAX_DEPTH) || 3,
+    maxExecutionsPerRequest: Number(process.env.HANDOFF_MAX_EXECUTIONS) || 6,
+    timeoutMs: Number(process.env.HANDOFF_TIMEOUT_MS) || 60000,
+    maxTaskLength: Number(process.env.HANDOFF_MAX_TASK_LENGTH) || 2000,
+  },
 };
