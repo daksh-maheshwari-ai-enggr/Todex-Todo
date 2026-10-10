@@ -15,6 +15,8 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   bots         Bot[]    @relation("UserBots")
+  chats       Chat[]    @relation("UserChats")
+  messages    Message[] @relation("UserMessages")
 
   @@index([email])
 }
@@ -30,7 +32,38 @@ model Bot {
   sandboxId     String?  // Nullable for future Daytona integration
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  chats        Chat[]   @relation("BotChats")
 
   @@index([userId])
   @@index([id])
+}
+
+model Chat {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation("UserChats", fields: [userId], references: [id])
+  botId       String?
+  bot         Bot?      @relation("BotChats", fields: [botId], references: [id])
+  title       String    @db.VarChar(100)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  messages    Message[] @relation("ChatMessages")
+
+  @@index([userId])
+  @@index([botId])
+}
+
+model Message {
+  id          String    @id @default(cuid())
+  chatId      String
+  chat        Chat      @relation("ChatMessages", fields: [chatId], references: [id])
+  senderId    String
+  sender      User      @relation("UserMessages", fields: [senderId], references: [id])
+  role        String    @enum(["user", "assistant", "tool"])
+  content     String    @db.VarChar(4000)
+  createdAt   DateTime  @default(now())
+  isRead      Boolean   @default(false)
+
+  @@index([chatId])
+  @@index([senderId])
 }
