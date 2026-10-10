@@ -4,6 +4,7 @@ import botsRoutes from "./routes/bots.js";
 import chatsRoutes from "./routes/chats.js";
 import messagesRoutes from "./routes/messages.js";
 import agentsRoutes from "./routes/agents.js";
+import toolExecutionsRoutes from "./routes/toolExecutions.js";
 import { config } from "./config.js";
 
 const app = express();
@@ -15,6 +16,7 @@ app.use("/api/bots", botsRoutes);
 app.use("/api/chats", chatsRoutes);
 app.use("/api/messages", messagesRoutes);
 app.use("/api/agents", agentsRoutes);
+app.use("/api/tool-executions", toolExecutionsRoutes);
 
 app.listen(config.port, () => {
   console.log(`Server listening on port ${config.port}`);

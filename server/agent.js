@@ -9,6 +9,7 @@ import {
 import { createChatModel } from "./openrouter.js";
 import { config } from "./config.js";
 import { tools } from "./tools/registry.js";
+import { startToolExecution, finishToolExecution } from "./toolExecutions.js";
 
 // Maximum length of a single inbound user message. Kept in sync with the
 // Message.content column limit in prisma/schema.prisma.
@@ -25,6 +26,7 @@ const AgentState = Annotation.Root({
   // Trusted execution context, set by server-side code at invoke time. It is
   // never derived from model output or tool arguments.
   userId: Annotation({ reducer: (_, next) => next, default: () => null }),
+  chatId: Annotation({ reducer: (_, next) => next, default: () => null }),
   botJob: Annotation({ reducer: (_, next) => next, default: () => "" }),
   botInstructions: Annotation({ reducer: (_, next) => next, default: () => "" }),
   conversationHistory: Annotation({
@@ -147,10 +149,71 @@ function routeAfterModel(state) {
   return executedToolCalls >= MAX_TOOL_CALLS ? "finalize" : "tools";
 }
 
+// Tools node: runs the requested tool calls via the LangGraph ToolNode and
+// records each execution. It wraps ToolNode so tool results still reach the
+// model in the expected format, while persistence is best-effort and never
+// blocks tool execution or the reasoning loop. User/chat identity comes from
+// trusted graph state, never from model-generated tool arguments.
+async function toolsExecutionNode(state, runtimeConfig) {
+  const last = state.messages.at(-1);
+  const toolCalls =
+    isAIMessage(last) && Array.isArray(last.tool_calls) ? last.tool_calls : [];
+
+  const started = new Map();
+
+  await Promise.all(
+    toolCalls.map(async (call) => {
+      const startedAt = new Date();
+      let recordId = null;
+      try {
+        const record = await startToolExecution({
+          chatId: state.chatId,
+          userId: state.userId,
+          toolName: call.name,
+          toolCallId: call.id,
+          args: call.args,
+        });
+        recordId = record?.id ?? null;
+      } catch (error) {
+        // A persistence failure must not block tool execution or the loop; the
+        // execution simply is not recorded. Only the message is logged.
+        console.warn("Failed to record tool execution start:", error?.message);
+      }
+      started.set(call.id, { recordId, startedAt });
+    }),
+  );
+
+  const result = await toolNode.invoke(state, runtimeConfig);
+  const toolMessages = Array.isArray(result?.messages) ? result.messages : [];
+
+  await Promise.all(
+    toolMessages.map(async (message) => {
+      const info = started.get(message.tool_call_id);
+      if (!info?.recordId) return;
+
+      const failed = message.status === "error";
+      try {
+        await finishToolExecution({
+          id: info.recordId,
+          status: failed ? "FAILED" : "SUCCEEDED",
+          result: failed ? null : contentToText(message.content),
+          error: failed ? contentToText(message.content) : null,
+          startedAt: info.startedAt,
+          completedAt: new Date(),
+        });
+      } catch (error) {
+        console.warn("Failed to record tool execution result:", error?.message);
+      }
+    }),
+  );
+
+  return result;
+}
+
 // START -> model -> (tools -> model | finalize | END). Compiled once at load.
 const agentGraph = new StateGraph(AgentState)
   .addNode("model", modelNode)
-  .addNode("tools", toolNode)
+  .addNode("tools", toolsExecutionNode)
   .addNode("finalize", finalizeNode)
   .addEdge(START, "model")
   .addConditionalEdges("model", routeAfterModel, ["tools", "finalize", END])
@@ -173,6 +236,7 @@ function extractFinalResponse(messages) {
 // supplied by the authenticated request, not by the model.
 export async function generateAgentResponse({
   userId,
+  chatId,
   botJob,
   botInstructions,
   conversationHistory = [],
@@ -186,6 +250,7 @@ export async function generateAgentResponse({
     const result = await agentGraph.invoke(
       {
         userId,
+        chatId,
         botJob,
         botInstructions,
         conversationHistory,

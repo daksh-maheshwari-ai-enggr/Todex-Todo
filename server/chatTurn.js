@@ -30,6 +30,7 @@ export async function runChatTurn({ bot, chat, userId, message }) {
   try {
     response = await generateAgentResponse({
       userId,
+      chatId: chat.id,
       botJob: bot.job,
       botInstructions: bot.instructions || "",
       conversationHistory,

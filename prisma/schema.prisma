@@ -18,6 +18,7 @@ model User {
   chats       Chat[]    @relation("UserChats")
   messages    Message[] @relation("UserMessages")
   todos       Todo[]    @relation("UserTodos")
+  toolExecutions ToolExecution[] @relation("UserToolExecutions")
 
   @@index([email])
 }
@@ -49,6 +50,7 @@ model Chat {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   messages    Message[] @relation("ChatMessages")
+  toolExecutions ToolExecution[] @relation("ChatToolExecutions")
 
   @@index([userId])
   @@index([botId])
@@ -85,5 +87,34 @@ model Todo {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  @@index([userId])
+}
+
+enum ToolExecutionStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+model ToolExecution {
+  id          String              @id @default(cuid())
+  chatId      String
+  chat        Chat                @relation("ChatToolExecutions", fields: [chatId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User                @relation("UserToolExecutions", fields: [userId], references: [id], onDelete: Cascade)
+  toolName    String              @db.VarChar(100)
+  toolCallId  String?             @db.VarChar(200)
+  args        String?             @db.VarChar(4000)
+  status      ToolExecutionStatus @default(PENDING)
+  result      String?             @db.VarChar(4000)
+  error       String?             @db.VarChar(2000)
+  startedAt   DateTime?
+  completedAt DateTime?
+  durationMs  Int?
+  createdAt   DateTime            @default(now())
+
+  @@unique([chatId, toolCallId])
+  @@index([chatId])
   @@index([userId])
 }
