@@ -10,47 +10,59 @@ import {
 
 const router = Router();
 
-function sanitizeString(value, maxLength) {
-  if (typeof value !== "string") return "";
+function validateString(value, maxLength, fieldName) {
+  if (typeof value !== "string") {
+    throw new Error(`Invalid type for ${fieldName}: expected string`);
+  }
+
   const trimmed = value.trim();
-  return trimmed.slice(0, maxLength);
+
+  if (trimmed.length === 0) {
+    throw new Error(`${fieldName} cannot be empty`);
+  }
+
+  if (trimmed.length > maxLength) {
+    throw new Error(`${fieldName} exceeds maximum length of ${maxLength}`);
+  }
+
+  return trimmed;
+}
+
+function validateOptionalString(value, maxLength, fieldName) {
+  if (value === undefined) return undefined;
+
+  if (typeof value !== "string") {
+    throw new Error(`Invalid type for ${fieldName}: expected string or undefined`);
+  }
+
+  const trimmed = value.trim();
+
+  if (trimmed.length > maxLength) {
+    throw new Error(`${fieldName} exceeds maximum length of ${maxLength}`);
+  }
+
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 router.post("/", requireAuth, async (req, res) => {
   const { name, job, instructions } = req.body || {};
 
-  if (!name || !job) {
-    return res.status(400).json({ error: "name and job are required" });
-  }
-
-  const sanitizedName = sanitizeString(name, 50);
-  const sanitizedJob = sanitizeString(job, 100);
-  const sanitizedInstructions = sanitizeString(instructions || "", 4000);
-
-  if (sanitizedName === "") {
-    return res.status(400).json({ error: "name is required" });
-  }
-
-  if (sanitizedJob === "") {
-    return res.status(400).json({ error: "job is required" });
-  }
-
-  // Generate a simple avatar seed - in production this could be more sophisticated
-  const avatarSeed = Math.random().toString(36).substring(2, 8);
-
   try {
+    const validatedName = validateString(name, 50, "name");
+    const validatedJob = validateString(job, 100, "job");
+    const validatedInstructions = validateOptionalString(instructions, 4000, "instructions");
+
     const bot = await createBot({
       userId: req.user.id,
-      name: sanitizedName,
-      avatar: avatarSeed,
-      job: sanitizedJob,
-      instructions: sanitizedInstructions || undefined,
+      name: validatedName,
+      job: validatedJob,
+      instructions: validatedInstructions,
     });
 
     res.status(201).json({ bot });
   } catch (error) {
-    console.error("Error creating bot:", error);
-    res.status(500).json({ error: "Failed to create bot" });
+    console.error("Error creating bot:", error.message);
+    res.status(400).json({ error: error.message });
   }
 });
 
@@ -91,41 +103,37 @@ router.patch("/:id", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Invalid bot ID" });
   }
 
-  const updateData = {};
-
-  if (name !== undefined) {
-    const sanitizedName = sanitizeString(name, 50);
-    if (sanitizedName === "") {
-      return res.status(400).json({ error: "name cannot be empty" });
-    }
-    updateData.name = sanitizedName;
-  }
-
-  if (job !== undefined) {
-    const sanitizedJob = sanitizeString(job, 100);
-    if (sanitizedJob === "") {
-      return res.status(400).json({ error: "job cannot be empty" });
-    }
-    updateData.job = sanitizedJob;
-  }
-
-  if (instructions !== undefined) {
-    updateData.instructions = sanitizeString(instructions, 4000) || undefined;
-  }
-
-  if (Object.keys(updateData).length === 0) {
-    return res.status(400).json({ error: "No valid fields to update" });
-  }
-
   try {
-    const bot = await updateBot(id, updateData);
-    if (!bot) {
-      return res.status(404).json({ error: "Bot not found" });
+    const updateData = {};
+
+    if (name !== undefined) {
+      const validatedName = validateString(name, 50, "name");
+      updateData.name = validatedName;
     }
+
+    if (job !== undefined) {
+      const validatedJob = validateString(job, 100, "job");
+      updateData.job = validatedJob;
+    }
+
+    if (instructions !== undefined) {
+      const validatedInstructions = validateOptionalString(instructions, 4000, "instructions");
+      updateData.instructions = validatedInstructions;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: "No valid fields to update" });
+    }
+
+    const bot = await updateBot(id, req.user.id, updateData);
+    if (!bot) {
+      return res.status(404).json({ error: "Bot not found or does not belong to the authenticated user" });
+    }
+
     res.json({ bot });
   } catch (error) {
-    console.error("Error updating bot:", error);
-    res.status(500).json({ error: "Failed to update bot" });
+    console.error("Error updating bot:", error.message);
+    res.status(400).json({ error: error.message });
   }
 });
 
@@ -137,9 +145,9 @@ router.delete("/:id", requireAuth, async (req, res) => {
   }
 
   try {
-    const bot = await deleteBot(id);
+    const bot = await deleteBot(id, req.user.id);
     if (!bot) {
-      return res.status(404).json({ error: "Bot not found" });
+      return res.status(404).json({ error: "Bot not found or does not belong to the authenticated user" });
     }
     res.status(204).send();
   } catch (error) {
