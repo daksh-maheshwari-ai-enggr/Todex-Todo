@@ -2,6 +2,9 @@ import { prisma } from "./prisma.js";
 
 const ALLOWED_ROLES = ["user", "assistant", "tool"];
 
+// Matches the Message.content column limit in prisma/schema.prisma.
+const MAX_CONTENT_LENGTH = 4000;
+
 // Attach an HTTP status to service errors so routes can map them consistently.
 function httpError(status, message) {
   const error = new Error(message);
@@ -15,6 +18,10 @@ function validateMessageData(data) {
 
   if (!content || typeof content !== "string" || content.trim().length === 0) {
     throw httpError(400, "Content is required and must be a non-empty string.");
+  }
+
+  if (content.length > MAX_CONTENT_LENGTH) {
+    throw httpError(400, `Content exceeds the maximum length of ${MAX_CONTENT_LENGTH} characters.`);
   }
 
   if (!role || typeof role !== "string" || !ALLOWED_ROLES.includes(role.toLowerCase())) {
@@ -57,6 +64,29 @@ export async function createMessage(chatId, senderId, role, content) {
       senderId,
       role: validatedData.role,
       content: validatedData.content,
+    },
+  });
+}
+
+// Trusted server-side helper used only by the chat-turn orchestration. It is
+// intentionally not reachable from any public route: ASSISTANT/TOOL messages
+// must never be creatable from client input. Assistant replies are stored
+// against the authenticated chat owner because Message.senderId references User.
+export async function createAssistantMessage(chatId, senderId, content) {
+  if (typeof content !== "string" || content.trim().length === 0) {
+    throw httpError(400, "Assistant content must be a non-empty string.");
+  }
+
+  if (content.length > MAX_CONTENT_LENGTH) {
+    throw httpError(400, `Content exceeds the maximum length of ${MAX_CONTENT_LENGTH} characters.`);
+  }
+
+  return prisma.message.create({
+    data: {
+      chatId,
+      senderId,
+      role: "ASSISTANT",
+      content: content.trim(),
     },
   });
 }
