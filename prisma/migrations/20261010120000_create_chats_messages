@@ -32,24 +32,9 @@ CREATE INDEX "Chat_botId_idx" ON "Chat"("botId");
 CREATE INDEX "Message_chatId_idx" ON "Message"("chatId");
 CREATE INDEX "Message_senderId_idx" ON "Message"("senderId");
 
-<<<<<<< HEAD
--- Create Foreign Keys
-CREATE FOREIGN KEY("UserChats_chat_id_user_id")
-    ON "Chat" REFERENCES "User"("id") ON DELETE CASCADE;
-
-CREATE FOREIGN KEY("BotChats_chat_id_bot_id")
-    ON "Chat" REFERENCES "Bot"("id") ON DELETE SET NULL;
-
-CREATE FOREIGN KEY("UserMessages_message_chat_id_user_id")
-    ON "Message" REFERENCES "Chat"("id") ON DELETE CASCADE;
-
-CREATE FOREIGN KEY("UserMessages_message_sender_id_user_id")
-    ON "Message" REFERENCES "User"("id") ON DELETE CASCADE;
-=======
 -- Add Foreign Keys
 ALTER TABLE "Chat" ADD CONSTRAINT "Chat_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE;
 ALTER TABLE "Chat" ADD CONSTRAINT "Chat_botId_fkey" FOREIGN KEY ("botId") REFERENCES "Bot"("id") ON DELETE SET NULL;
 
 ALTER TABLE "Message" ADD CONSTRAINT "Message_chatId_fkey" FOREIGN KEY ("chatId") REFERENCES "Chat"("id") ON DELETE CASCADE;
 ALTER TABLE "Message" ADD CONSTRAINT "Message_senderId_fkey" FOREIGN KEY ("senderId") REFERENCES "User"("id") ON DELETE CASCADE;
->>>>>>> 51b18a0 (Implement Chats and Messages)

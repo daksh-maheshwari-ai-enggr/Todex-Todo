@@ -15,7 +15,7 @@ function validateMessageData(data) {
 
   return {
     content: content.trim(),
-    role,
+    role: role.toUpperCase(), // Ensure role is uppercase to match enum
   }
 }
 
@@ -35,6 +35,11 @@ export async function createMessage(chatId, senderId, role, content) {
     throw new Error("Chat not found or does not belong to the sender.");
   }
 
+  // Only allow USER role for public endpoints
+  if (validatedData.role !== "USER") {
+    throw new Error("Only user messages are allowed.");
+  }
+
   return prisma.message.create({
     data: {
       chatId,
@@ -46,26 +51,32 @@ export async function createMessage(chatId, senderId, role, content) {
 }
 
 // Find messages for a chat
-export async function findMessagesByChatId(chatId) {
+export async function findMessagesByChatId(chatId, userId) {
   return prisma.message.findMany({
     where: {
       chatId,
+      senderId: userId, // Only return messages from the user
     },
     orderBy: {
       createdAt: "asc",
     },
     include: {
-      sender: true,
+      sender: {
+        select: {
+          id: true,
+          name: true,
+        } // Only return minimal sender info
+      },
     },
   });
 }
 
 // Mark messages as read
-export async function markMessagesAsRead(chatId, senderId) {
+export async function markMessagesAsRead(chatId, userId) {
   return prisma.message.updateMany({
     where: {
       chatId,
-      senderId,
+      senderId: userId,
       isRead: false,
     },
     data: {
