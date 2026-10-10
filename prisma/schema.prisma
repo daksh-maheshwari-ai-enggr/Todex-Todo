@@ -17,6 +17,7 @@ model User {
   bots         Bot[]    @relation("UserBots")
   chats       Chat[]    @relation("UserChats")
   messages    Message[] @relation("UserMessages")
+  todos       Todo[]    @relation("UserTodos")
 
   @@index([email])
 }
@@ -72,4 +73,17 @@ model Message {
 
   @@index([chatId])
   @@index([senderId])
+}
+
+model Todo {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation("UserTodos", fields: [userId], references: [id], onDelete: Cascade)
+  title       String   @db.VarChar(200)
+  description String?  @db.VarChar(2000)
+  completed   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
 }

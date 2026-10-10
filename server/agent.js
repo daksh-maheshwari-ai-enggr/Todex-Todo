@@ -1,19 +1,30 @@
 import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
 import {
   SystemMessage,
   HumanMessage,
   AIMessage,
+  isAIMessage,
 } from "@langchain/core/messages";
 import { createChatModel } from "./openrouter.js";
 import { config } from "./config.js";
+import { tools } from "./tools/registry.js";
 
 // Maximum length of a single inbound user message. Kept in sync with the
 // Message.content column limit in prisma/schema.prisma.
 export const MAX_MESSAGE_LENGTH = 4000;
 
-// LangGraph state definition for the agent workflow. Every field must be
-// declared explicitly so the graph knows how to merge node updates.
+// Safety cap on the number of tool executions in one turn. Once reached, the
+// graph stops requesting tools and forces a plain final answer instead of
+// looping forever. `recursionLimit` below is a second backstop.
+const MAX_TOOL_CALLS = 8;
+const GRAPH_RECURSION_LIMIT = 25;
+
+// LangGraph state definition for the agent workflow.
 const AgentState = Annotation.Root({
+  // Trusted execution context, set by server-side code at invoke time. It is
+  // never derived from model output or tool arguments.
+  userId: Annotation({ reducer: (_, next) => next, default: () => null }),
   botJob: Annotation({ reducer: (_, next) => next, default: () => "" }),
   botInstructions: Annotation({ reducer: (_, next) => next, default: () => "" }),
   conversationHistory: Annotation({
@@ -21,17 +32,25 @@ const AgentState = Annotation.Root({
     default: () => [],
   }),
   message: Annotation({ reducer: (_, next) => next, default: () => "" }),
-  response: Annotation({ reducer: (_, next) => next, default: () => "" }),
+  // Working LangChain message list. Appended to by the model and tool nodes so
+  // the tool loop can keep feeding results back to the model.
+  messages: Annotation({
+    reducer: (current, next) => current.concat(next),
+    default: () => [],
+  }),
 });
 
 // Build the model once and reuse it (and the compiled graph) across requests.
 const chatModel = createChatModel();
+const modelWithTools = chatModel.bindTools(tools);
+const toolNode = new ToolNode(tools);
 
 export function buildSystemPrompt(botJob, botInstructions) {
   return [
     botJob ? `Your job: ${botJob}` : "",
     botInstructions ? `Instructions:\n${botInstructions}` : "",
     "You are an assistant that responds to user messages in the context of the bot's job and instructions. Respond as concisely as possible.",
+    "You may call the available tools to manage the user's tasks. Only call a tool when it is genuinely needed, and use the results to answer.",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -61,16 +80,14 @@ function historyToMessages(history) {
   return messages;
 }
 
-// Model node: assembles the prompt from the bot job/instructions, the persisted
-// conversation history and the current user message, then calls the provider.
-async function callModel(state) {
+// Seed the working message list from the bot prompt, the persisted history and
+// the current user message (without adding the current message twice).
+function buildInitialMessages(state) {
   const messages = [
     new SystemMessage(buildSystemPrompt(state.botJob, state.botInstructions)),
     ...historyToMessages(state.conversationHistory),
   ];
 
-  // The current user message is supplied separately from history. If the last
-  // persisted message is already this same user message, do not add it twice.
   const currentMessage = String(state.message || "").trim();
   const last = state.conversationHistory?.at?.(-1);
   const alreadyPersisted =
@@ -82,20 +99,80 @@ async function callModel(state) {
     messages.push(new HumanMessage(currentMessage));
   }
 
-  const aiMessage = await chatModel.invoke(messages);
-  return { response: contentToText(aiMessage.content) };
+  return messages;
 }
 
-// Single model node: START -> model -> END. Compiled once at module load.
+// Model node: on the first pass seeds the prompt/history, then calls the
+// tool-bound model. On later passes it reuses the accumulated message list.
+async function modelNode(state, runtimeConfig) {
+  const isFirstPass = state.messages.length === 0;
+  const base = isFirstPass ? buildInitialMessages(state) : state.messages;
+  const aiMessage = await modelWithTools.invoke(base, runtimeConfig);
+
+  // Persist the seed into state on the first pass so it survives the loop.
+  return isFirstPass
+    ? { messages: [...base, aiMessage] }
+    : { messages: [aiMessage] };
+}
+
+// Final node used when the tool-call cap is reached: call the model without
+// tools so it must produce a normal answer. Any pending tool calls are dropped
+// from the last AI message so the provider does not reject an unanswered call.
+async function finalizeNode(state, runtimeConfig) {
+  const messages = state.messages.slice();
+  const last = messages.at(-1);
+  if (isAIMessage(last) && last.tool_calls?.length) {
+    messages[messages.length - 1] = new AIMessage({
+      content: contentToText(last.content) || "",
+    });
+  }
+
+  const aiMessage = await chatModel.invoke(messages, runtimeConfig);
+  return { messages: [aiMessage] };
+}
+
+// Conditional routing after the model: run tools while the model requests them,
+// force a final answer once the cap is reached, otherwise finish the graph.
+function routeAfterModel(state) {
+  const last = state.messages.at(-1);
+  const hasToolCalls =
+    isAIMessage(last) && Array.isArray(last.tool_calls) && last.tool_calls.length > 0;
+
+  if (!hasToolCalls) return END;
+
+  const executedToolCalls = state.messages.filter(
+    (message) => message.getType?.() === "tool",
+  ).length;
+
+  return executedToolCalls >= MAX_TOOL_CALLS ? "finalize" : "tools";
+}
+
+// START -> model -> (tools -> model | finalize | END). Compiled once at load.
 const agentGraph = new StateGraph(AgentState)
-  .addNode("model", callModel)
+  .addNode("model", modelNode)
+  .addNode("tools", toolNode)
+  .addNode("finalize", finalizeNode)
   .addEdge(START, "model")
-  .addEdge("model", END)
+  .addConditionalEdges("model", routeAfterModel, ["tools", "finalize", END])
+  .addEdge("tools", "model")
+  .addEdge("finalize", END)
   .compile();
 
+function extractFinalResponse(messages) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (isAIMessage(messages[i])) {
+      const text = contentToText(messages[i].content).trim();
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
 // Execute the agent workflow. Kept separate from Express route handling so the
-// transport layer only deals with HTTP concerns.
+// transport layer only deals with HTTP concerns. `userId` is trusted context
+// supplied by the authenticated request, not by the model.
 export async function generateAgentResponse({
+  userId,
   botJob,
   botInstructions,
   conversationHistory = [],
@@ -108,14 +185,15 @@ export async function generateAgentResponse({
   try {
     const result = await agentGraph.invoke(
       {
+        userId,
         botJob,
         botInstructions,
         conversationHistory,
         message,
       },
-      { signal: controller.signal },
+      { signal: controller.signal, recursionLimit: GRAPH_RECURSION_LIMIT },
     );
-    return result.response;
+    return extractFinalResponse(result.messages);
   } finally {
     clearTimeout(timer);
   }
