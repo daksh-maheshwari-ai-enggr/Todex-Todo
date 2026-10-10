@@ -1,5 +1,4 @@
 import { prisma } from "../prisma.js";
-import { requireAuth } from "../middleware/auth.js";
 
 // Helper function to validate chat data
 function validateChatData(data) {

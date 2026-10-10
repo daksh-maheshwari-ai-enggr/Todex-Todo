@@ -1,5 +1,4 @@
 import { prisma } from "../prisma.js";
-import { requireAuth } from "../middleware/auth.js";
 
 // Helper function to validate message data
 function validateMessageData(data) {
@@ -51,11 +50,11 @@ export async function createMessage(chatId, senderId, role, content) {
 }
 
 // Find messages for a chat
-export async function findMessagesByChatId(chatId, userId) {
+export async function findMessagesByChatId(chatId) {
   return prisma.message.findMany({
     where: {
       chatId,
-      senderId: userId, // Only return messages from the user
+      senderId: req.user.id, // Only return messages from the authenticated user
     },
     orderBy: {
       createdAt: "asc",
@@ -72,11 +71,11 @@ export async function findMessagesByChatId(chatId, userId) {
 }
 
 // Mark messages as read
-export async function markMessagesAsRead(chatId, userId) {
+export async function markMessagesAsRead(chatId) {
   return prisma.message.updateMany({
     where: {
       chatId,
-      senderId: userId,
+      senderId: req.user.id, // Only mark messages as read for the authenticated user
       isRead: false,
     },
     data: {
