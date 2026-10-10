@@ -14,6 +14,23 @@ model User {
   passwordHash String
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  bots         Bot[]    @relation("UserBots")
 
   @@index([email])
+}
+
+model Bot {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation("UserBots", fields: [userId], references: [id])
+  name          String   @db.VarChar(50)
+  avatar        String   @db.VarChar(100)  // Will store avatar seed/URL
+  job           String   @db.VarChar(100)
+  instructions  String?  @db.VarChar(4000)
+  sandboxId     String?  // Nullable for future Daytona integration
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId])
+  @@index([id])
 }
