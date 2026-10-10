@@ -21,5 +21,6 @@ export const config = {
     apiKey: required("OPENROUTER_API_KEY"),
     model: optional("OPENROUTER_MODEL", "openai/gpt-3.5-turbo"),
     baseUrl: optional("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+    timeoutMs: Number(process.env.OPENROUTER_TIMEOUT_MS) || 30000,
   },
 };

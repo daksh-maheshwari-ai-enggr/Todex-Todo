@@ -1,43 +1,55 @@
-import { prisma } from "../prisma.js";
+import { prisma } from "./prisma.js";
+
+const ALLOWED_ROLES = ["user", "assistant", "tool"];
+
+// Attach an HTTP status to service errors so routes can map them consistently.
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
 
 // Helper function to validate message data
 function validateMessageData(data) {
-  const { content, role } = data || {}
+  const { content, role } = data || {};
 
   if (!content || typeof content !== "string" || content.trim().length === 0) {
-    throw new Error("Content is required and must be a non-empty string.");
+    throw httpError(400, "Content is required and must be a non-empty string.");
   }
 
-  if (!role || !["user", "assistant", "tool"].includes(role)) {
-    throw new Error("Role is required and must be one of: 'user', 'assistant', 'tool'");
+  if (!role || typeof role !== "string" || !ALLOWED_ROLES.includes(role.toLowerCase())) {
+    throw httpError(400, "Role is required and must be one of: 'user', 'assistant', 'tool'.");
   }
 
   return {
     content: content.trim(),
-    role: role.toUpperCase(), // Ensure role is uppercase to match enum
+    role: role.toUpperCase(), // Match the Prisma MessageRole enum
+  };
+}
+
+// Ensure the chat exists and is owned by the given user.
+async function assertChatOwnership(chatId, userId) {
+  const chat = await prisma.chat.findFirst({
+    where: { id: chatId, userId },
+  });
+
+  if (!chat) {
+    throw httpError(404, "Chat not found or does not belong to the authenticated user.");
   }
+
+  return chat;
 }
 
 // Create a new message
 export async function createMessage(chatId, senderId, role, content) {
   const validatedData = validateMessageData({ content, role });
 
-  // Verify chat ownership
-  const chat = await prisma.chat.findUnique({
-    where: {
-      id: chatId,
-      userId: senderId, // Only allow messages from users who own the chat
-    },
-  });
-
-  if (!chat) {
-    throw new Error("Chat not found or does not belong to the sender.");
-  }
-
-  // Only allow USER role for public endpoints
+  // Public message creation only accepts user-authored messages.
   if (validatedData.role !== "USER") {
-    throw new Error("Only user messages are allowed.");
+    throw httpError(400, "Only user messages are allowed.");
   }
+
+  await assertChatOwnership(chatId, senderId);
 
   return prisma.message.create({
     data: {
@@ -49,12 +61,13 @@ export async function createMessage(chatId, senderId, role, content) {
   });
 }
 
-// Find messages for a chat
-export async function findMessagesByChatId(chatId) {
+// Find the complete conversation history for a chat the user owns.
+export async function findMessagesByChatId(chatId, userId) {
+  await assertChatOwnership(chatId, userId);
+
   return prisma.message.findMany({
     where: {
       chatId,
-      senderId: req.user.id, // Only return messages from the authenticated user
     },
     orderBy: {
       createdAt: "asc",
@@ -64,18 +77,22 @@ export async function findMessagesByChatId(chatId) {
         select: {
           id: true,
           name: true,
-        } // Only return minimal sender info
+        },
       },
     },
   });
 }
 
-// Mark messages as read
-export async function markMessagesAsRead(chatId) {
+// Mark incoming messages (assistant/tool, i.e. not user-authored) as read.
+// senderId cannot distinguish the parties because assistant replies are stored
+// against the chat owner, so the MessageRole is the discriminator here.
+export async function markMessagesAsRead(chatId, userId) {
+  await assertChatOwnership(chatId, userId);
+
   return prisma.message.updateMany({
     where: {
       chatId,
-      senderId: req.user.id, // Only mark messages as read for the authenticated user
+      role: { in: ["ASSISTANT", "TOOL"] },
       isRead: false,
     },
     data: {

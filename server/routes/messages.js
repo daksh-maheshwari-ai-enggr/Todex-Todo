@@ -8,8 +8,17 @@ import {
 
 const router = Router();
 
+// Map a service error to an HTTP response without leaking internals.
+function sendError(res, error, fallbackMessage) {
+  if (error?.status) {
+    return res.status(error.status).json({ error: error.message });
+  }
+  console.error(fallbackMessage, error?.message);
+  return res.status(500).json({ error: fallbackMessage });
+}
+
 router.post("/", requireAuth, async (req, res) => {
-  const { chatId, content, role } = req.body || {}
+  const { chatId, content, role } = req.body || {};
 
   if (!chatId || typeof chatId !== "string") {
     return res.status(400).json({ error: "chatId is required and must be a string." });
@@ -19,20 +28,20 @@ router.post("/", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Content is required and must be a non-empty string." });
   }
 
-  if (!role || !["user", "assistant", "tool"].includes(role.toLowerCase())) {
-    return res.status(400).json({ error: "Role is required and must be one of: 'user', 'assistant', 'tool'" });
+  if (!role || typeof role !== "string") {
+    return res.status(400).json({ error: "Role is required and must be one of: 'user', 'assistant', 'tool'." });
+  }
+
+  // Public message creation only accepts user-authored messages.
+  if (role.toLowerCase() !== "user") {
+    return res.status(400).json({ error: "Only user messages are allowed." });
   }
 
   try {
-    const message = await createMessage(chatId, role, content);
+    const message = await createMessage(chatId, req.user.id, role, content);
     res.status(201).json({ message });
   } catch (error) {
-    console.error("Error creating message:", error.message);
-    if (error.message.includes("Chat not found") || error.message.includes("does not belong")) {
-      res.status(404).json({ error: error.message });
-    } else {
-      res.status(500).json({ error: "Failed to create message" });
-    }
+    sendError(res, error, "Failed to create message.");
   }
 });
 
@@ -44,11 +53,10 @@ router.get("/:chatId", requireAuth, async (req, res) => {
   }
 
   try {
-    const messages = await findMessagesByChatId(chatId);
+    const messages = await findMessagesByChatId(chatId, req.user.id);
     res.json({ messages });
   } catch (error) {
-    console.error("Error fetching messages:", error.message);
-    res.status(500).json({ error: "Failed to fetch messages" });
+    sendError(res, error, "Failed to fetch messages.");
   }
 });
 
@@ -60,14 +68,13 @@ router.patch("/:chatId/read", requireAuth, async (req, res) => {
   }
 
   try {
-    const updatedCount = await markMessagesAsRead(chatId);
+    const updatedCount = await markMessagesAsRead(chatId, req.user.id);
     res.json({
       success: true,
       updatedCount: updatedCount.count,
     });
   } catch (error) {
-    console.error("Error marking messages as read:", error.message);
-    res.status(500).json({ error: "Failed to mark messages as read" });
+    sendError(res, error, "Failed to mark messages as read.");
   }
 });
 

@@ -1,14 +1,18 @@
-import { OpenAI } from "@langchain/openai";
+import { ChatOpenAI } from "@langchain/openai";
 import { config } from "./config.js";
 
-// Create OpenRouter-compatible OpenAI client
-const openRouterClient = new OpenAI({
-  apiKey: config.openRouter.apiKey,
-  baseURL: config.openRouter.baseUrl,
-  modelName: config.openRouter.model,
-  temperature: 0.7,
-  maxTokens: 1024,
-  timeout: 30000,
-});
-
-export { openRouterClient };
+// OpenRouter exposes an OpenAI-compatible Chat Completions API. Use LangChain's
+// ChatOpenAI chat-model client (instead of the raw OpenAI SDK) so the agent can
+// invoke it through the standard LangChain message/tool-calling interface.
+export function createChatModel() {
+  return new ChatOpenAI({
+    apiKey: config.openRouter.apiKey,
+    model: config.openRouter.model,
+    temperature: 0.7,
+    maxTokens: 1024,
+    timeout: config.openRouter.timeoutMs,
+    configuration: {
+      baseURL: config.openRouter.baseUrl,
+    },
+  });
+}

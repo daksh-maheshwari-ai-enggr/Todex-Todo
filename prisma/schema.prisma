@@ -41,9 +41,9 @@ model Bot {
 model Chat {
   id          String    @id @default(cuid())
   userId      String
-  user        User      @relation("UserChats", fields: [userId], references: [id])
+  user        User      @relation("UserChats", fields: [userId], references: [id], onDelete: Cascade)
   botId       String?
-  bot         Bot?      @relation("BotChats", fields: [botId], references: [id])
+  bot         Bot?      @relation("BotChats", fields: [botId], references: [id], onDelete: SetNull)
   title       String    @db.VarChar(100)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -62,9 +62,9 @@ enum MessageRole {
 model Message {
   id          String    @id @default(cuid())
   chatId      String
-  chat        Chat      @relation("ChatMessages", fields: [chatId], references: [id])
+  chat        Chat      @relation("ChatMessages", fields: [chatId], references: [id], onDelete: Cascade)
   senderId    String
-  sender      User      @relation("UserMessages", fields: [senderId], references: [id])
+  sender      User      @relation("UserMessages", fields: [senderId], references: [id], onDelete: Cascade)
   role        MessageRole
   content     String    @db.VarChar(4000)
   createdAt   DateTime  @default(now())
