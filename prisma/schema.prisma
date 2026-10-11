@@ -20,6 +20,7 @@ model User {
   todos       Todo[]    @relation("UserTodos")
   toolExecutions ToolExecution[] @relation("UserToolExecutions")
   handoffs    Handoff[] @relation("UserHandoffs")
+  aiJobs      AiJob[]  @relation("UserAiJobs")
 
   @@index([email])
 }
@@ -40,6 +41,7 @@ model Bot {
   chatParticipants ChatParticipant[] @relation("BotChatParticipants")
   handoffsFrom Handoff[] @relation("HandoffFrom")
   handoffsTo   Handoff[] @relation("HandoffTo")
+  aiJobs       AiJob[]  @relation("BotAiJobs")
 
   @@index([userId])
   @@index([id])
@@ -58,6 +60,7 @@ model Chat {
   toolExecutions ToolExecution[] @relation("ChatToolExecutions")
   participants ChatParticipant[] @relation("ChatParticipants")
   handoffs    Handoff[] @relation("ChatHandoffs")
+  aiJobs      AiJob[]  @relation("ChatAiJobs")
 
   @@index([userId])
   @@index([botId])
@@ -177,4 +180,56 @@ model Handoff {
   @@index([userId])
   @@index([fromBotId])
   @@index([toBotId])
+}
+
+// Durable background AI job metadata. A job is the application's own record of
+// a long-running teammate turn dispatched to Trigger.dev; Trigger.dev remains
+// the execution layer, this table is the source of truth for app-visible
+// lifecycle, ownership and bounded results.
+enum AiJobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model AiJob {
+  id                 String      @id @default(cuid())
+  userId             String
+  user               User        @relation("UserAiJobs", fields: [userId], references: [id], onDelete: Cascade)
+  chatId             String
+  chat               Chat        @relation("ChatAiJobs", fields: [chatId], references: [id], onDelete: Cascade)
+  botId              String
+  bot                Bot         @relation("BotAiJobs", fields: [botId], references: [id], onDelete: Cascade)
+  status             AiJobStatus @default(QUEUED)
+  // Bounded, validated copy of the user request. This is the only task input
+  // material stored; the Trigger.dev payload carries just the job id.
+  message            String      @db.VarChar(4000)
+  // Trigger.dev run identifier once dispatch succeeded. Null means the job was
+  // never confirmed dispatched.
+  runId              String?     @db.VarChar(200)
+  // Latest raw Trigger.dev run status, kept for reconciliation/observability.
+  runStatus          String?     @db.VarChar(40)
+  // Optional client-supplied key used to deduplicate repeated start requests.
+  idempotencyKey     String?     @db.VarChar(200)
+  attemptCount       Int         @default(0)
+  maxAttempts        Int         @default(3)
+  // Reused across attempts so a retry never duplicates the user message. The
+  // Message rows themselves remain the authoritative chat record.
+  userMessageId      String?     @db.VarChar(200)
+  assistantMessageId String?     @db.VarChar(200)
+  // Bounded success result / sanitized failure message (never a stack trace).
+  result             String?     @db.VarChar(4000)
+  error              String?     @db.VarChar(2000)
+  createdAt          DateTime    @default(now())
+  startedAt          DateTime?
+  completedAt        DateTime?
+  updatedAt          DateTime    @updatedAt
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId])
+  @@index([chatId])
+  @@index([botId])
+  @@index([status])
 }

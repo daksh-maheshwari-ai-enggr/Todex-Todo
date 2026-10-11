@@ -2,3 +2,6 @@
 .env.local
 node_modules
 prisma/generated
+
+# Trigger.dev local build output (created by `npx trigger.dev@latest dev`)
+.trigger

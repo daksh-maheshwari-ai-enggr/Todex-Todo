@@ -13,6 +13,12 @@ function optional(name, defaultValue = null) {
   return process.env[name] || defaultValue;
 }
 
+// Trigger.dev is the durable execution layer for long-running teammate turns.
+// It is optional: without a secret key the app still boots and every existing
+// synchronous endpoint keeps working. Only the background job endpoints report
+// "not configured".
+const triggerSecretKey = optional("TRIGGER_SECRET_KEY", null);
+
 export const config = {
   databaseUrl: required("DATABASE_URL"),
   jwtSecret: required("JWT_SECRET"),
@@ -54,5 +60,16 @@ export const config = {
     listMaxEntries: Number(process.env.DAYTONA_LIST_MAX_ENTRIES) || 200,
     // Relative directory inside the sandbox work dir reserved for file tools.
     workspaceDir: optional("DAYTONA_WORKSPACE_DIR", "workspace"),
+  },
+  triggerDev: {
+    // Secrets stay server-side. Optional so the app boots without Trigger.dev.
+    secretKey: triggerSecretKey,
+    // Project ref is only needed by the Trigger.dev CLI/build, not by dispatch.
+    projectRef: optional("TRIGGER_PROJECT_REF", null),
+    // Bounds applied to every dispatched run, deliberately generous enough to
+    // cover the whole handoff chain (handoffs.timeoutMs) with retries.
+    maxAttempts: Number(process.env.TRIGGER_JOB_MAX_ATTEMPTS) || 3,
+    maxDurationSec: Number(process.env.TRIGGER_JOB_MAX_DURATION_SEC) || 900,
+    enabled: Boolean(triggerSecretKey),
   },
 };

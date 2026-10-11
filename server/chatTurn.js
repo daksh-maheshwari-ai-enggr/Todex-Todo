@@ -3,6 +3,21 @@ import { generateAgentResponse } from "./agent.js";
 import { createMessage, createAssistantMessage } from "./messages.js";
 import { loadConversationContext } from "./memory.js";
 
+// Default persistence for a finished turn: store the assistant reply, then bump
+// the chat's updatedAt. Used by the synchronous respond endpoint. Background
+// job execution substitutes a transactional version so the reply and the job's
+// terminal status are recorded atomically.
+async function defaultPersistAssistant({ chat, userId, bot, response }) {
+  const assistantMessage = await createAssistantMessage(chat.id, userId, response, bot.id);
+
+  await prisma.chat.update({
+    where: { id: chat.id },
+    data: { updatedAt: new Date() },
+  });
+
+  return assistantMessage;
+}
+
 // Execute one complete authenticated chat turn:
 //   1. persist the user's message
 //   2. load the existing history (which now includes that message)
@@ -11,9 +26,21 @@ import { loadConversationContext } from "./memory.js";
 //
 // Kept separate from the Express route and from the agent/graph itself. The
 // caller is responsible for validating ownership of the bot and chat.
-export async function runChatTurn({ bot, chat, userId, message, participants = [] }) {
+//
+// `userMessage` lets a retried background attempt reuse the message saved by an
+// earlier attempt instead of writing it again. `persistAssistant` lets the
+// background runner commit the reply together with the job's terminal state.
+export async function runChatTurn({
+  bot,
+  chat,
+  userId,
+  message,
+  participants = [],
+  userMessage = null,
+  persistAssistant = defaultPersistAssistant,
+}) {
   // 1. Persist the user message first. createMessage enforces the USER role.
-  const userMessage = await createMessage(chat.id, userId, "user", message);
+  const savedUserMessage = userMessage ?? (await createMessage(chat.id, userId, "user", message));
 
   // 2. Load a bounded, chronological slice of the chat's history as agent
   //    context. It includes the message we just saved; the agent de-duplicates
@@ -36,29 +63,31 @@ export async function runChatTurn({ bot, chat, userId, message, participants = [
       botJob: bot.job,
       botInstructions: bot.instructions || "",
       conversationHistory,
-      message: userMessage.content,
+      message: savedUserMessage.content,
     });
   } catch (error) {
-    error.userMessage = userMessage;
+    error.userMessage = savedUserMessage;
     error.isProviderError = true;
     throw error;
   }
 
   if (!response || response.trim().length === 0) {
     const error = new Error("The AI provider returned an empty response.");
-    error.userMessage = userMessage;
+    error.userMessage = savedUserMessage;
     error.isProviderError = true;
     throw error;
   }
 
-  // 4. Persist the assistant reply only after successful generation, then mark
-  //    the turn complete by touching the chat's updatedAt.
-  const assistantMessage = await createAssistantMessage(chat.id, userId, response, bot.id);
+  // 4. Persist the assistant reply only after successful generation. A failure
+  //    here still returns the saved user message to the caller so it is never
+  //    lost, exactly like a generation failure.
+  let assistantMessage;
+  try {
+    assistantMessage = await persistAssistant({ chat, userId, bot, response });
+  } catch (error) {
+    error.userMessage = savedUserMessage;
+    throw error;
+  }
 
-  await prisma.chat.update({
-    where: { id: chat.id },
-    data: { updatedAt: new Date() },
-  });
-
-  return { userMessage, assistantMessage };
+  return { userMessage: savedUserMessage, assistantMessage };
 }

@@ -73,7 +73,10 @@ export async function createMessage(chatId, senderId, role, content) {
 // must never be creatable from client input. Assistant replies are stored
 // against the authenticated chat owner because Message.senderId references User.
 // `botId` optionally attributes the reply to the teammate that produced it.
-export async function createAssistantMessage(chatId, senderId, content, botId = null) {
+// `client` lets trusted callers (the background job runner) include this write
+// in a transaction with the job's terminal update; it defaults to the shared
+// client so existing callers are unaffected.
+export async function createAssistantMessage(chatId, senderId, content, botId = null, client = prisma) {
   if (typeof content !== "string" || content.trim().length === 0) {
     throw httpError(400, "Assistant content must be a non-empty string.");
   }
@@ -82,7 +85,7 @@ export async function createAssistantMessage(chatId, senderId, content, botId = 
     throw httpError(400, `Content exceeds the maximum length of ${MAX_CONTENT_LENGTH} characters.`);
   }
 
-  return prisma.message.create({
+  return client.message.create({
     data: {
       chatId,
       senderId,
