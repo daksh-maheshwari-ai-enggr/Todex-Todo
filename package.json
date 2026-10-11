@@ -5,7 +5,9 @@
   "main": "server/index.js",
   "scripts": {
     "dev": "node --watch server/index.js",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "dev:client": "npm --prefix client run dev",
+    "build:client": "npm --prefix client run build"
   },
   "dependencies": {
     "@daytonaio/sdk": "^0.223.1",

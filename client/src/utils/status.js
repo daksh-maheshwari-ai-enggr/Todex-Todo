@@ -1,0 +1,66 @@
+// Shared status vocabulary for jobs, tool executions and handoffs. Keeping the
+// mapping in one place means a status badge always looks the same everywhere.
+
+// Tone names map to the palette tokens in index.css: success (green), running
+// (amber), error (red), idle (neutral).
+const TONES = {
+  success: {
+    badge: "bg-success text-success-ink",
+    dot: "bg-success-ink",
+  },
+  running: {
+    badge: "bg-running text-running-ink",
+    dot: "bg-running-ink",
+  },
+  error: {
+    badge: "bg-error text-error-ink",
+    dot: "bg-error-ink",
+  },
+  idle: {
+    badge: "bg-primary-soft text-primary-strong",
+    dot: "bg-primary-strong",
+  },
+  neutral: {
+    badge: "bg-line-soft text-ink-muted",
+    dot: "bg-ink-muted",
+  },
+};
+
+export function toneClasses(tone) {
+  return TONES[tone] ?? TONES.neutral;
+}
+
+// Application job lifecycle: QUEUED | RUNNING | SUCCEEDED | FAILED | CANCELLED
+const JOB_STATUS = {
+  QUEUED: { label: "Queued", tone: "idle" },
+  RUNNING: { label: "Running", tone: "running" },
+  SUCCEEDED: { label: "Succeeded", tone: "success" },
+  FAILED: { label: "Failed", tone: "error" },
+  CANCELLED: { label: "Cancelled", tone: "neutral" },
+};
+
+// Tool execution / handoff lifecycle: PENDING | RUNNING | SUCCEEDED | FAILED
+const EXECUTION_STATUS = {
+  PENDING: { label: "Pending", tone: "neutral" },
+  RUNNING: { label: "Running", tone: "running" },
+  SUCCEEDED: { label: "Succeeded", tone: "success" },
+  FAILED: { label: "Failed", tone: "error" },
+};
+
+function describe(map, status, fallback) {
+  const key = typeof status === "string" ? status.toUpperCase() : "";
+  return map[key] ?? { label: status ? String(status) : fallback, tone: "neutral" };
+}
+
+export function jobStatus(status) {
+  return describe(JOB_STATUS, status, "Unknown");
+}
+
+export function executionStatus(status) {
+  return describe(EXECUTION_STATUS, status, "Unknown");
+}
+
+// Active job states are the ones worth polling and worth offering a cancel for.
+export function isJobActive(status) {
+  return status === "QUEUED" || status === "RUNNING";
+}
