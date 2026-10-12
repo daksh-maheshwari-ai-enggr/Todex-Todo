@@ -61,6 +61,50 @@ export const config = {
     // Relative directory inside the sandbox work dir reserved for file tools.
     workspaceDir: optional("DAYTONA_WORKSPACE_DIR", "workspace"),
   },
+  // Browser automation runs inside the teammate's sandbox. The backend reaches
+  // the in-sandbox browser session through a Daytona preview link (the preview
+  // token never leaves the server), so no sandbox port is ever exposed directly.
+  browser: {
+    // Port the in-sandbox browser session listens on.
+    sessionPort: Number(process.env.BROWSER_SESSION_PORT) || 7331,
+    // Where the session script, its node_modules and its logs live in the sandbox.
+    installDir: optional("BROWSER_INSTALL_DIR", ".todex-browser"),
+    // Chromium binary to drive. Empty means whatever the image provides.
+    executablePath: optional("BROWSER_EXECUTABLE_PATH", null),
+    // Command used to install Chromium into a sandbox that does not have it.
+    // Overridable because a local registry mirror can make the default package
+    // manager unusably slow; a baked snapshot removes the need entirely.
+    installCommand: optional(
+      "BROWSER_INSTALL_COMMAND",
+      "sudo bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium' 2>&1 | tail -5",
+    ),
+    headless: process.env.BROWSER_HEADLESS !== "false",
+    viewportWidth: Number(process.env.BROWSER_VIEWPORT_WIDTH) || 1280,
+    viewportHeight: Number(process.env.BROWSER_VIEWPORT_HEIGHT) || 800,
+    // Per-action ceiling for a single browser operation.
+    actionTimeoutMs: Number(process.env.BROWSER_ACTION_TIMEOUT_MS) || 30000,
+    // Page loads get their own, longer ceiling.
+    navigationTimeoutMs: Number(process.env.BROWSER_NAV_TIMEOUT_MS) || 45000,
+    // Bounding every piece of page text handed back to the model.
+    maxContentChars: Number(process.env.BROWSER_MAX_CONTENT_CHARS) || 20000,
+    maxLinks: Number(process.env.BROWSER_MAX_LINKS) || 60,
+    // Screenshot/frame delivery. JPEG quality is only used for live frames.
+    maxScreenshotBytes: Number(process.env.BROWSER_MAX_SCREENSHOT_BYTES) || 3000000,
+    frameQuality: Number(process.env.BROWSER_FRAME_QUALITY) || 55,
+    frameMaxBytes: Number(process.env.BROWSER_FRAME_MAX_BYTES) || 200000,
+    frameIntervalMs: Number(process.env.BROWSER_FRAME_INTERVAL_MS) || 400,
+    // How long to wait for a cold bootstrap (package install) before giving up.
+    bootstrapTimeoutMs: Number(process.env.BROWSER_BOOTSTRAP_TIMEOUT_MS) || 900000,
+  },
+  search: {
+    // Reusable web research provider. Deliberately optional: with no key the
+    // search tool reports that it is not configured instead of pretending.
+    provider: optional("SEARCH_PROVIDER", "exa"),
+    exaApiKey: optional("EXA_API_KEY", null),
+    maxResults: Number(process.env.SEARCH_MAX_RESULTS) || 5,
+    timeoutMs: Number(process.env.SEARCH_TIMEOUT_MS) || 15000,
+    maxExcerptChars: Number(process.env.SEARCH_MAX_EXCERPT_CHARS) || 1200,
+  },
   triggerDev: {
     // Secrets stay server-side. Optional so the app boots without Trigger.dev.
     secretKey: triggerSecretKey,

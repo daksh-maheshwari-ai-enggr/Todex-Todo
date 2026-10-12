@@ -33,6 +33,11 @@ function getClient() {
       ...(config.daytona.apiUrl ? { apiUrl: config.daytona.apiUrl } : {}),
       ...(config.daytona.target ? { target: config.daytona.target } : {}),
     });
+    // One line per process: shows which endpoint the SDK will actually call.
+    // The key is never logged, only whether one is present.
+    console.log(
+      `[sandbox] daytona client configured (apiUrl=${config.daytona.apiUrl || "default"}, target=${config.daytona.target || "default"}, apiKey=set)`,
+    );
   }
   return client;
 }
@@ -58,9 +63,10 @@ async function resolveOwnedBot(userId, botId) {
 async function persistSandboxId(botId, sandboxId) {
   try {
     await prisma.bot.update({ where: { id: botId }, data: { sandboxId } });
+    console.log(`[sandbox] persisted sandboxId=${sandboxId ?? "null"} on bot ${botId}`);
   } catch (error) {
     // Never claim a sandbox was recorded when the write failed.
-    console.warn("Failed to persist sandbox id:", error?.message);
+    console.warn(`[sandbox] failed to persist sandboxId on bot ${botId}:`, error?.message);
   }
 }
 
@@ -72,12 +78,22 @@ async function createSandboxForBot(bot) {
 
   const promise = (async () => {
     const daytona = getClient();
-    const sandbox = await daytona.create(
-      { language: config.daytona.language, labels: { app: "todex-todo" } },
-      { timeout: config.daytona.createTimeoutSec },
-    );
-    await persistSandboxId(bot.id, sandbox.id);
-    return sandbox;
+    console.log(`[sandbox] creating sandbox for bot ${bot.id} (language=${config.daytona.language})`);
+    try {
+      const sandbox = await daytona.create(
+        {
+          snapshot: "sandbox-slim",
+          labels: { app: "todex-todo" },
+        },
+        { timeout: config.daytona.createTimeoutSec },
+      );
+      console.log(`[sandbox] created sandbox ${sandbox.id} for bot ${bot.id}, persisting id`);
+      await persistSandboxId(bot.id, sandbox.id);
+      return sandbox;
+    } catch (error) {
+      console.warn(`[sandbox] create failed for bot ${bot.id}:`, error?.message);
+      throw error;
+    }
   })().finally(() => creating.delete(bot.id));
 
   creating.set(bot.id, promise);
@@ -94,6 +110,7 @@ export async function getSandboxForBot({ userId, botId }) {
     try {
       const sandbox = await daytona.get(bot.sandboxId);
       await sandbox.refreshData();
+      console.log(`[sandbox] bot ${bot.id} has stored sandbox ${bot.sandboxId} in state ${sandbox.state}`);
 
       if (sandbox.state === SandboxState.STARTED) {
         return { bot, sandbox };
@@ -115,6 +132,26 @@ export async function getSandboxForBot({ userId, botId }) {
 
   const sandbox = await createSandboxForBot(bot);
   return { bot, sandbox };
+}
+
+// Read-only lookup of an existing sandbox. Unlike getSandboxForBot it never
+// starts, repairs or creates anything, so endpoints the UI polls (browser
+// status, previews) cannot provision infrastructure as a side effect.
+export async function getExistingSandboxForBot({ userId, botId }) {
+  const bot = await resolveOwnedBot(userId, botId);
+  if (!bot.sandboxId) {
+    return { bot, sandbox: null, state: "none" };
+  }
+
+  try {
+    const daytona = getClient();
+    const sandbox = await daytona.get(bot.sandboxId);
+    await sandbox.refreshData();
+    return { bot, sandbox, state: sandbox.state ?? "unknown" };
+  } catch (error) {
+    console.warn(`[sandbox] stored sandbox ${bot.sandboxId} is unavailable:`, error?.message);
+    return { bot, sandbox: null, state: "unavailable" };
+  }
 }
 
 // Report the current state of a teammate's sandbox without creating one.

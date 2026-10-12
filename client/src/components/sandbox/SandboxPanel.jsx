@@ -1,15 +1,16 @@
 import { useState } from "react";
-import { Activity, FolderTree, Monitor, SquareTerminal } from "lucide-react";
+import { Activity, FolderTree, Monitor, Radio, SquareTerminal } from "lucide-react";
 import Tabs from "../ui/Tabs.jsx";
 import BrowserPane from "./BrowserPane.jsx";
 import TerminalPane from "./TerminalPane.jsx";
 import FilesPane from "./FilesPane.jsx";
 import ActivityFeed from "../activity/ActivityFeed.jsx";
+import LiveActivityFeed from "../activity/LiveActivityFeed.jsx";
 import { sandboxSummary } from "../../utils/sandboxData.js";
 
-// The right-hand workspace panel: a large sandbox view with four tabs. All data
-// is real (persisted tool executions and handoffs); the Browser/Desktop tab is
-// explicit about the preview endpoint that the backend does not have yet.
+// The right-hand workspace panel: a large sandbox view with tabs. Live events
+// stream in while a turn runs; the Activity tab keeps the durable, persisted
+// record of tool calls and handoffs.
 export default function SandboxPanel({
   teammate,
   executions = [],
@@ -17,11 +18,17 @@ export default function SandboxPanel({
   activityLoading = false,
   activityError = null,
   onRefreshActivity,
+  liveEvents = [],
+  liveConnection = "idle",
+  liveError = null,
+  liveTaskState = "idle",
+  onClearLive,
 }) {
-  const [tab, setTab] = useState("browser");
+  const [tab, setTab] = useState("live");
   const summary = sandboxSummary(executions);
 
   const tabs = [
+    { id: "live", label: "Live", icon: Radio, count: liveEvents.length || null },
     { id: "browser", label: "Browser / Desktop", icon: Monitor },
     { id: "terminal", label: "Terminal", icon: SquareTerminal, count: summary.commands },
     { id: "files", label: "Files", icon: FolderTree, count: summary.files },
@@ -39,6 +46,15 @@ export default function SandboxPanel({
         )}
       </div>
 
+      {tab === "live" && (
+        <LiveActivityFeed
+          events={liveEvents}
+          connection={liveConnection}
+          error={liveError}
+          taskState={liveTaskState}
+          onClear={onClearLive}
+        />
+      )}
       {tab === "browser" && <BrowserPane teammate={teammate} />}
       {tab === "terminal" && (
         <TerminalPane executions={executions} loading={activityLoading} />

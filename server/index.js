@@ -7,6 +7,8 @@ import agentsRoutes from "./routes/agents.js";
 import toolExecutionsRoutes from "./routes/toolExecutions.js";
 import handoffsRoutes from "./routes/handoffs.js";
 import jobsRoutes from "./routes/jobs.js";
+import activityRoutes from "./routes/activity.js";
+import sandboxViewRoutes from "./routes/sandboxView.js";
 import { config } from "./config.js";
 
 const app = express();
@@ -21,6 +23,8 @@ app.use("/api/agents", agentsRoutes);
 app.use("/api/tool-executions", toolExecutionsRoutes);
 app.use("/api/handoffs", handoffsRoutes);
 app.use("/api/jobs", jobsRoutes);
+app.use("/api/activity", activityRoutes);
+app.use("/api/sandbox", sandboxViewRoutes);
 
 app.listen(config.port, () => {
   console.log(`Server listening on port ${config.port}`);

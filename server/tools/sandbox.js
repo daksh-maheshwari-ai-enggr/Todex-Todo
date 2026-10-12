@@ -15,6 +15,9 @@ function getTrustedContext(runtime) {
   const { userId, botId } = configured;
 
   if (!userId || !botId) {
+    // Without this context the sandbox service would have no trusted bot to
+    // resolve, so the call is rejected before any provider request.
+    console.warn("[sandbox-tool] rejected call: missing trusted userId/botId in runtime config");
     throw new Error("Sandbox tools are not available in this context.");
   }
 

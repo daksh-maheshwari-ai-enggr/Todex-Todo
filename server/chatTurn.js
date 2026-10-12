@@ -2,6 +2,11 @@ import { prisma } from "./prisma.js";
 import { generateAgentResponse } from "./agent.js";
 import { createMessage, createAssistantMessage } from "./messages.js";
 import { loadConversationContext } from "./memory.js";
+import {
+  activityTaskStarted,
+  activityTaskCompleted,
+  activityTaskBlocked,
+} from "./activity.js";
 
 // Default persistence for a finished turn: store the assistant reply, then bump
 // the chat's updatedAt. Used by the synchronous respond endpoint. Background
@@ -51,6 +56,15 @@ export async function runChatTurn({
     userId,
   });
 
+  // The turn has genuinely started: the user message is persisted and the agent
+  // is about to run. Everything after this point is a real execution milestone.
+  activityTaskStarted({
+    chatId: chat.id,
+    botId: bot.id,
+    botName: bot.name,
+    message: savedUserMessage.content,
+  });
+
   // 3. Generate. On any generation failure, keep the saved user message and
   //    surface it to the caller so it can return a safe error without losing it.
   let response;
@@ -66,6 +80,11 @@ export async function runChatTurn({
       message: savedUserMessage.content,
     });
   } catch (error) {
+    activityTaskBlocked({
+      chatId: chat.id,
+      botId: bot.id,
+      reason: error?.message ?? "The agent run failed.",
+    });
     error.userMessage = savedUserMessage;
     error.isProviderError = true;
     throw error;
@@ -73,6 +92,7 @@ export async function runChatTurn({
 
   if (!response || response.trim().length === 0) {
     const error = new Error("The AI provider returned an empty response.");
+    activityTaskBlocked({ chatId: chat.id, botId: bot.id, reason: error.message });
     error.userMessage = savedUserMessage;
     error.isProviderError = true;
     throw error;
@@ -85,9 +105,12 @@ export async function runChatTurn({
   try {
     assistantMessage = await persistAssistant({ chat, userId, bot, response });
   } catch (error) {
+    activityTaskBlocked({ chatId: chat.id, botId: bot.id, reason: error?.message });
     error.userMessage = savedUserMessage;
     throw error;
   }
+
+  activityTaskCompleted({ chatId: chat.id, botId: bot.id, summary: response });
 
   return { userMessage: savedUserMessage, assistantMessage };
 }

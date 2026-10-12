@@ -8,7 +8,7 @@ import tailwindcss from "@tailwindcss/vite";
 //
 // VITE_API_TARGET overrides the target for the rare case where the API runs
 // elsewhere; the default stays the documented port 3000.
-const apiTarget = process.env.VITE_API_TARGET || "http://localhost:3000";
+const apiTarget = process.env.VITE_API_TARGET || "http://localhost:4003";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

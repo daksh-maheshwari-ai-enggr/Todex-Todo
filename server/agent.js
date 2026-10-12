@@ -12,6 +12,12 @@ import { tools } from "./tools/registry.js";
 import { createHandoffTool } from "./tools/handoff.js";
 import { startToolExecution, finishToolExecution } from "./toolExecutions.js";
 import { createHandoff, finishHandoff } from "./handoffs.js";
+import {
+  activityAgentThinking,
+  activityToolStarted,
+  activityToolFinished,
+  activityHandoff,
+} from "./activity.js";
 
 // Maximum length of a single inbound user message. Kept in sync with the
 // Message.content column limit in prisma/schema.prisma.
@@ -55,6 +61,9 @@ const chatModel = createChatModel();
 // only trusted, server-resolved context.
 const handoffTool = createHandoffTool({ runTeammate: runTeammateAgent });
 const allTools = [...tools, handoffTool];
+// One line at load so "which tools does the agent actually have?" is never a
+// guess when debugging a missing tool call.
+console.log(`[agent] registered ${allTools.length} tools: ${allTools.map((t) => t.name).join(", ")}`);
 const modelWithTools = chatModel.bindTools(allTools);
 const toolNode = new ToolNode(allTools);
 
@@ -130,6 +139,11 @@ function buildInitialMessages(state) {
 async function modelNode(state, runtimeConfig) {
   const isFirstPass = state.messages.length === 0;
   const base = isFirstPass ? buildInitialMessages(state) : state.messages;
+
+  // Real milestone: the model is being asked to decide the next action.
+  const step = state.messages.filter((message) => message.getType?.() === "ai").length + 1;
+  activityAgentThinking({ chatId: state.chatId, botId: state.botId, step });
+
   const aiMessage = await modelWithTools.invoke(base, runtimeConfig);
 
   // Persist the seed into state on the first pass so it survives the loop.
@@ -180,6 +194,12 @@ async function toolsExecutionNode(state, runtimeConfig) {
   const toolCalls =
     isAIMessage(last) && Array.isArray(last.tool_calls) ? last.tool_calls : [];
 
+  if (toolCalls.length > 0) {
+    console.log(
+      `[agent] executing ${toolCalls.length} tool call(s) for chat ${state.chatId}: ${toolCalls.map((c) => c.name).join(", ")}`,
+    );
+  }
+
   const started = new Map();
 
   await Promise.all(
@@ -200,6 +220,14 @@ async function toolsExecutionNode(state, runtimeConfig) {
         // execution simply is not recorded. Only the message is logged.
         console.warn("Failed to record tool execution start:", error?.message);
       }
+
+      activityToolStarted({
+        chatId: state.chatId,
+        botId: state.botId,
+        toolName: call.name,
+        args: call.args,
+      });
+
       started.set(call.id, { recordId, startedAt });
     }),
   );
@@ -213,6 +241,16 @@ async function toolsExecutionNode(state, runtimeConfig) {
       if (!info?.recordId) return;
 
       const failed = message.status === "error";
+
+      // Publish the tool's actual outcome (bounded) to the live activity stream.
+      activityToolFinished({
+        chatId: state.chatId,
+        botId: state.botId,
+        toolName: message.name ?? "tool",
+        result: contentToText(message.content),
+        ok: !failed,
+      });
+
       try {
         await finishToolExecution({
           id: info.recordId,
@@ -351,6 +389,8 @@ async function runTeammateAgent({
     console.warn("Failed to record handoff start:", error?.message);
   }
 
+  activityHandoff({ chatId, botId: fromBotId, to: toBot.name, task, phase: "start" });
+
   try {
     const result = await invokeGraph({
       userId,
@@ -373,6 +413,14 @@ async function runTeammateAgent({
     if (record) {
       await safelyFinishHandoff(record.id, "SUCCEEDED", result, null);
     }
+
+    activityHandoff({
+      chatId,
+      botId: fromBotId,
+      to: toBot.name,
+      task,
+      phase: "finish",
+    });
 
     return { ok: true, teammate: toBot.name, result };
   } catch (error) {

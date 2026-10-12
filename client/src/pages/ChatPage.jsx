@@ -27,6 +27,7 @@ import SandboxPanel from "../components/sandbox/SandboxPanel.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
 import { useAsync } from "../hooks/useAsync.js";
 import { usePolling } from "../hooks/usePolling.js";
+import { useActivityStream } from "../hooks/useActivityStream.js";
 import {
   createChat,
   deleteChat,
@@ -74,6 +75,10 @@ function ChatWorkspace({ chatId }) {
     },
     [chatId],
   );
+
+  // Live execution events for this conversation, streamed from the backend as
+  // the agent works. Separate from `activity`, which is the persisted record.
+  const live = useActivityStream(chatId);
 
   const [selectedBotId, setSelectedBotId] = useState(null);
   const [sending, setSending] = useState(false);
@@ -366,6 +371,11 @@ function ChatWorkspace({ chatId }) {
               activityLoading={activity.loading}
               activityError={activity.error}
               onRefreshActivity={() => activity.refetch({ silent: true })}
+              liveEvents={live.events}
+              liveConnection={live.connection}
+              liveError={live.error}
+              liveTaskState={live.taskState}
+              onClearLive={live.clear}
             />
           </div>
         </div>
