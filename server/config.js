@@ -132,6 +132,12 @@ export const config = {
     // killed by the provider mid-call.
     maxDurationMs: Number(process.env.JOB_MAX_DURATION_MS) || 600000,
   },
+  // Scheduled / proactive runs (ROADMAP.md Phase D). The sweep task dispatches
+  // due tasks; bounds keep one pass cheap and a bad schedule from stampeding.
+  scheduledTasks: {
+    // Due tasks handled per sweep pass.
+    sweepBatchSize: Number(process.env.SCHEDULED_TASK_SWEEP_BATCH) || 10,
+  },
   search: {
     // Reusable web research provider. Deliberately optional: with no key the
     // search tool reports that it is not configured instead of pretending.

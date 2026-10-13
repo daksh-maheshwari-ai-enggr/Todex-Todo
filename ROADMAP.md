@@ -304,26 +304,65 @@ enum AiJobStatus { QUEUED  RUNNING  WAITING_FOR_USER  SUCCEEDED  FAILED  CANCELL
 
 ## 6. Phase D — Scheduling & proactive tasks
 
+> **Status: implemented (2026-10-14); not yet verified.** Migration
+> `20261014000000_add_scheduled_tasks` applied; compiles (server `node --check`,
+> module load, client `vite build` exit 0). No scenario has been run — testing is
+> deferred at the user's request. Deliberate deviations from this spec:
+>
+> * **`cron` is not supported yet.** v1 schedules are `runAt` (one-shot, or the
+>   first run of a repeating task) plus `intervalMinutes`. A cron *expression*
+>   needs either a parser dependency or provider-side math; the SDK already
+>   offers the latter — `schedules.create({ task, cron, externalId })` — so the
+>   follow-up is `schedules.create/update/del` per task plus a task that reads
+>   `payload.schedule.externalId`. Deferred rather than guessed, because it is a
+>   second scheduling mechanism to keep in step with the sweep.
+> * **`timezone` is not stored.** With instants and fixed intervals a timezone
+>   has no meaning; inventing a column we do not honour would be worse than
+>   omitting it. It becomes necessary with cron ("daily at 09:00 in Berlin").
+> * The sweep runs **every minute** (the finest cron granularity), so a slot can
+>   fire up to ~60s late; the slot instant itself stays exact, which is what the
+>   idempotency key depends on.
+> * Missed slots are **skipped, not queued**, and a failed dispatch keeps its
+>   slot due (so the next sweep retries) instead of advancing past a lost run.
+> * The Meet demo (joining a call headless, screenshot notes on an interval) is
+>   not built — it is a scripted task on top of this machinery, not machinery.
+>   Real camera/mic participation remains explicitly out of scope.
+
 **Goal:** "attend the 3pm Meet", "message Priya at 5".
 
-- New model `ScheduledTask { id, userId, botId, chatId?, goal, runAt?, cron?,
-  timezone, status, lastRunAt, nextRunAt }` (different lifecycle: repeated/deferred).
-- `server/scheduledTasks.js` (CRUD + ownership) + `server/routes/scheduledTasks.js`.
-- `trigger/scheduled-task.js` — cron sweep → due tasks → dispatch the existing
-  `AI_JOB_TASK_ID` with the goal as the message (reuses Phase A/B machinery,
-  including pause-for-approval).
-- Results/asks land in the linked chat (`Message` + existing activity SSE) —
-  in-app notification first; email push later.
-- Meet demo: open the Meet URL in the sandbox browser, join with mic/camera off,
-  screenshot notes on an interval, post a summary. **Honest limitation:** real
-  camera/mic participation is out of scope for headless v1.
-- UI: extend `BackgroundJobsPage.jsx` (or a tab) with scheduled tasks.
+- New model `ScheduledTask` — ✅ (ACTIVE/PAUSED/COMPLETED, `runAt`,
+  `intervalMinutes`, `nextRunAt`, `lastRunAt`, `lastJobId`, `lastError`,
+  `runCount`). `nextRunAt` doubles as the run's idempotency slot.
+- `server/scheduledTasks.js` (CRUD + ownership + the due sweep) + ✅
+  `server/routes/scheduledTasks.js` (`POST/GET/GET :id/PATCH/DELETE` and
+  `POST /:id/run` for "run now").
+- `trigger/scheduled-task.js` — ✅ a `schedules.task` on `* * * * *` that asks
+  which tasks are due and dispatches the existing `AI_JOB_TASK_ID` path with the
+  goal as the message (so pause-for-approval, step budgets and crash-safe retry
+  are inherited).
+- Results/asks land in the linked chat — ✅ by construction (the run is an
+  ordinary job). Email push is still not implemented.
+- UI: ✅ `BackgroundJobsPage.jsx` now has Jobs / Scheduled tabs;
+  `components/scheduled/*` covers the list, card, create form and panel.
+
+**Files:** `prisma/schema.prisma` (+ `20261014000000_add_scheduled_tasks`),
+`server/scheduledTasks.js`, `server/routes/scheduledTasks.js`, `server/index.js`,
+`server/config.js`, `server/backgroundJobs.js` (exports `resolveOwnedContext` for
+reuse), `trigger/scheduled-task.js`, `client/src/services/scheduledTaskService.js`,
+`client/src/components/scheduled/{ScheduledTasksPanel,ScheduledTaskList,ScheduledTaskCard,ScheduledTaskForm}.jsx`,
+`client/src/components/ui/Input.jsx` (adds `Select`), `client/src/utils/status.js`,
+`client/src/pages/BackgroundJobsPage.jsx`.
+
+**New configuration:** `SCHEDULED_TASK_SWEEP_BATCH` (default 10).
 
 ### Phase D acceptance
 
 - [ ] A task scheduled +2 minutes runs unattended, posts its result to the chat.
-- [ ] A scheduled task that needs input pauses with an approval exactly like a chat-run.
+      **Not yet run.**
+- [ ] A scheduled task that needs input pauses with an approval exactly like a
+      chat-run. **Not yet run** (inherited from Phase A by construction).
 - [ ] Deleted/foreign `ScheduledTask` → 404; orphan runs cancelled.
+      **Implemented; not yet run.**
 
 ---
 
@@ -366,8 +405,9 @@ no AI-generated commands on the host · no credential exposure to model or front
 A (pause/resume) → B (durability) → C (takeover) → D (scheduling) → E (messaging)
 ```
 
-Progress: **A done and verified · B implemented (verification partly done, remainder
-deferred) · C implemented (verification deferred) · D, E not started.**
+Progress: **A done and verified · B implemented (verification partly done,
+remainder deferred) · C implemented (verification deferred) · D implemented
+(verification deferred) · E not started.**
 
 A is the spine: B makes pauses survive restarts, C removes the login blocker,
 D gives the agent its own clock, E is the first irreversible external action

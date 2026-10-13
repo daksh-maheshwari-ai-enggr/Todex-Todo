@@ -52,7 +52,9 @@ function assertNonEmptyString(value, field) {
 
 // Resolve the owning bot and chat and confirm the teammate may act in the chat.
 // Mirrors the synchronous respond route so both paths enforce identical rules.
-async function resolveOwnedContext({ userId, botId, chatId }) {
+// Exported because scheduled tasks (Phase D) accept exactly the same pair of
+// ids from the client and must enforce exactly the same ownership rules.
+export async function resolveOwnedContext({ userId, botId, chatId }) {
   const bot = await prisma.bot.findFirst({ where: { id: botId, userId } });
   if (!bot) {
     throw httpError(404, "Bot not found.");

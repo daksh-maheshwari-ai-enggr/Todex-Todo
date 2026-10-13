@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertCircle, Briefcase, Info, PauseCircle, RefreshCw, Zap } from "lucide-react";
+import { AlertCircle, Briefcase, CalendarClock, Info, PauseCircle, RefreshCw, Zap } from "lucide-react";
 import Topbar from "../components/layout/Topbar.jsx";
 import Card from "../components/ui/Card.jsx";
 import Button, { buttonClass } from "../components/ui/Button.jsx";
+import Tabs from "../components/ui/Tabs.jsx";
 import JobList from "../components/jobs/JobList.jsx";
+import ScheduledTasksPanel from "../components/scheduled/ScheduledTasksPanel.jsx";
 import { cancelJob, getJob, listJobs } from "../services/jobService.js";
 import { useAsync } from "../hooks/useAsync.js";
 import { usePolling } from "../hooks/usePolling.js";
@@ -21,6 +23,8 @@ const FILTERS = [
 ];
 
 export default function BackgroundJobsPage() {
+  // Two related views: the runs themselves, and the schedules that produce them.
+  const [view, setView] = useState("jobs");
   const [statusFilter, setStatusFilter] = useState("");
   const [pages, setPages] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
@@ -145,7 +149,20 @@ export default function BackgroundJobsPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 scrollbar-slim">
         <div className="mx-auto max-w-4xl space-y-4">
-          {waitingCount > 0 && (
+          <Tabs
+            tabs={[
+              { id: "jobs", label: "Jobs", icon: Briefcase, count: activeCount || null },
+              { id: "scheduled", label: "Scheduled", icon: CalendarClock },
+            ]}
+            activeId={view}
+            onChange={setView}
+          />
+
+          {view === "scheduled" && <ScheduledTasksPanel onViewJobs={() => setView("jobs")} />}
+
+          {view === "jobs" && (
+            <>
+              {waitingCount > 0 && (
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-running-ink/20 bg-running px-3 py-2 text-[11px] text-running-ink">
               <PauseCircle className="size-3.5 shrink-0" aria-hidden="true" />
               <span className="font-medium">
@@ -246,6 +263,8 @@ export default function BackgroundJobsPage() {
                 <span className="font-mono">npx trigger.dev@latest deploy</span>.
               </p>
             </Card>
+          )}
+            </>
           )}
         </div>
       </div>

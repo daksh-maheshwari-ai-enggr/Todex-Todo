@@ -41,6 +41,13 @@ const JOB_STATUS = {
   CANCELLED: { label: "Cancelled", tone: "neutral" },
 };
 
+// Scheduled task lifecycle: ACTIVE | PAUSED | COMPLETED.
+const SCHEDULED_TASK_STATUS = {
+  ACTIVE: { label: "Scheduled", tone: "idle" },
+  PAUSED: { label: "Paused", tone: "neutral" },
+  COMPLETED: { label: "Completed", tone: "success" },
+};
+
 // Tool execution / handoff lifecycle: PENDING | RUNNING | SUCCEEDED | FAILED
 const EXECUTION_STATUS = {
   PENDING: { label: "Pending", tone: "neutral" },
@@ -56,6 +63,10 @@ function describe(map, status, fallback) {
 
 export function jobStatus(status) {
   return describe(JOB_STATUS, status, "Unknown");
+}
+
+export function scheduledTaskStatus(status) {
+  return describe(SCHEDULED_TASK_STATUS, status, "Unknown");
 }
 
 export function executionStatus(status) {

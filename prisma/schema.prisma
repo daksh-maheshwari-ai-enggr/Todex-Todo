@@ -22,6 +22,7 @@ model User {
   handoffs    Handoff[]  @relation("UserHandoffs")
   aiJobs      AiJob[]  @relation("UserAiJobs")
   approvals   ApprovalRequest[] @relation("UserApprovals")
+  scheduledTasks ScheduledTask[] @relation("UserScheduledTasks")
 
   @@index([email])
 }
@@ -44,6 +45,7 @@ model Bot {
   handoffsTo   Handoff[] @relation("HandoffTo")
   aiJobs       AiJob[]  @relation("BotAiJobs")
   approvals    ApprovalRequest[] @relation("BotApprovals")
+  scheduledTasks ScheduledTask[] @relation("BotScheduledTasks")
 
   @@index([userId])
   @@index([id])
@@ -62,8 +64,9 @@ model Chat {
   toolExecutions ToolExecution[] @relation("ChatToolExecutions")
   participants ChatParticipant[] @relation("ChatParticipants")
   handoffs    Handoff[] @relation("ChatHandoffs")
-  aiJobs      AiJob[] @relation("ChatAiJobs")
+  aiJobs      AiJob[]   @relation("ChatAiJobs")
   approvals   ApprovalRequest[] @relation("ChatApprovals")
+  scheduledTasks ScheduledTask[] @relation("ChatScheduledTasks")
 
   @@index([userId])
   @@index([botId])
@@ -313,4 +316,49 @@ model ApprovalRequest {
   @@index([userId, status])
   @@index([chatId, status])
   @@index([aiJobId])
+}
+
+// A scheduled / proactive teammate run (ROADMAP.md Phase D).
+//
+// Deliberately a different lifecycle from AiJob: a task is a standing
+// instruction that produces runs over time — one (runAt) or many
+// (intervalMinutes) — and owns its own schedule bookkeeping. Every due slot
+// dispatches the same AI_JOB_TASK_ID as a manual background run, so pausing for
+// an approval, step budgets and crash-safe resume are inherited unchanged.
+enum ScheduledTaskStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+model ScheduledTask {
+  id              String              @id @default(cuid())
+  userId          String
+  user            User                @relation("UserScheduledTasks", fields: [userId], references: [id], onDelete: Cascade)
+  botId           String
+  bot             Bot                 @relation("BotScheduledTasks", fields: [botId], references: [id], onDelete: Cascade)
+  chatId          String
+  chat            Chat                @relation("ChatScheduledTasks", fields: [chatId], references: [id], onDelete: Cascade)
+  // The instruction handed to the teammate, bounded like any other request.
+  goal            String              @db.VarChar(4000)
+  // One-shot: the instant the run is due. Null for a repeating task.
+  runAt           DateTime?
+  // Repeating: minutes between runs (1440 = daily). Null for a one-shot.
+  intervalMinutes Int?
+  // When the next run is due. Doubles as the run's idempotency slot, so a sweep
+  // that fires twice can never dispatch the same slot twice.
+  nextRunAt       DateTime?
+  status          ScheduledTaskStatus @default(ACTIVE)
+  lastRunAt       DateTime?
+  // The job the most recent run dispatched, so the UI can link to its result.
+  lastJobId       String?             @db.VarChar(200)
+  // Why the last dispatch attempt failed. Kept visible instead of silently
+  // skipping a run; the slot stays due so the next sweep retries it.
+  lastError       String?             @db.VarChar(2000)
+  runCount        Int                 @default(0)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([userId, status])
+  @@index([status, nextRunAt])
 }
