@@ -217,6 +217,32 @@ export async function respondApproval({ approvalId, userId, answer, approved, no
   return updated;
 }
 
+// Assert that a *pending* approval justifies an action that reaches beyond the
+// chat — currently browser takeover (ROADMAP.md Phase C). Taking the wheel is
+// the human answering a real pause, never drive-by control of a teammate's
+// browser, so the approval must still be open, owned by the caller, and (when
+// the caller names a teammate) raised by that same teammate.
+export async function requirePendingApproval({ approvalId, userId, botId = null }) {
+  const approval = await findApprovalForUser(approvalId, userId);
+  if (!approval) {
+    throw httpError(404, "Approval request not found.");
+  }
+
+  if (approval.status !== "PENDING") {
+    throw httpError(409, "This approval request has already been resolved.");
+  }
+
+  if (approval.expiresAt && approval.expiresAt.getTime() < Date.now()) {
+    throw httpError(410, "This approval request has expired.");
+  }
+
+  if (botId && approval.botId && approval.botId !== botId) {
+    throw httpError(403, "This approval belongs to a different teammate.");
+  }
+
+  return approval;
+}
+
 // Drop every pending approval of a run/chat — used when the run is cancelled
 // so no card stays answerable for a run that will never resume.
 export async function cancelPendingApprovals({ chatId = null, aiJobId = null, reason = null }) {

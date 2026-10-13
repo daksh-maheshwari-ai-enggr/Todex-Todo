@@ -92,9 +92,20 @@ function ChatWorkspace({ chatId }) {
   const [activeJob, setActiveJob] = useState(null);
   const [responding, setResponding] = useState(false);
   const [approvalError, setApprovalError] = useState(null);
+  // Phase C browser takeover: the approval the user is currently handling by
+  // driving the teammate's own browser, and the reminder shown once they hand
+  // it back so the run resumes with what they did.
+  const [takeover, setTakeover] = useState(null);
+  const [handbackNotice, setHandbackNotice] = useState(null);
 
   const pendingApprovals = approvals.data ?? [];
   const currentApproval = pendingApprovals[0] ?? null;
+
+  // The takeover only stays live while its approval is still open; once the run
+  // is resumed the pane goes back to being a view.
+  const takeoverApproval = takeover
+    ? pendingApprovals.find((approval) => approval.id === takeover.approvalId) ?? null
+    : null;
 
   // Chat management (rename / delete) uses the existing PATCH and DELETE routes.
   const [renameOpen, setRenameOpen] = useState(false);
@@ -174,6 +185,34 @@ function ChatWorkspace({ chatId }) {
     ]);
   }
 
+  // Start a browser takeover for one open approval: the live view becomes
+  // interactive for that teammate's own session, so a login the user performs is
+  // the login the paused run continues with. The server only accepts this while
+  // the approval is still PENDING.
+  function startTakeover(approval) {
+    if (!approval) return;
+    setApprovalError(null);
+    setHandbackNotice(null);
+    if (approval.botId && approval.botId !== selectedBotId) {
+      // The pause may belong to another participant of a group chat; show that
+      // teammate's browser, which is the one holding the session.
+      setSelectedBotId(approval.botId);
+    }
+    setTakeover({ approvalId: approval.id, botId: approval.botId ?? selectedBotId ?? null });
+  }
+
+  // The browser was handed back: the human has done the part only they could do
+  // (signed in, cleared an OTP). Their answer still has to come from the approval
+  // card, which is what resumes the same run.
+  function handleBrowserHandBack(approval) {
+    if (!approval) return;
+    setHandbackNotice(
+      approval.kind === "ACTION"
+        ? "Browser handed back. Add anything the teammate should know in the approval card above, then approve — it continues in the session you just used."
+        : "Browser handed back. Answer the question above and the teammate continues in the session you just used.",
+    );
+  }
+
   // Answer/approve a paused run. The response resolves the approval server-side
   // and resumes the same run; a job-backed pause re-enters polling above.
   async function respondToApproval(approval, payload) {
@@ -181,6 +220,8 @@ function ChatWorkspace({ chatId }) {
     setApprovalError(null);
     try {
       const { resumed } = await respondApproval(approval.id, payload);
+      setTakeover(null);
+      setHandbackNotice(null);
       if (resumed?.id) {
         setActiveJob(resumed);
       } else if (approval.aiJobId) {
@@ -395,12 +436,21 @@ function ChatWorkspace({ chatId }) {
               }
             />
 
+            {handbackNotice && !takeoverApproval && (
+              <p className="border-t border-line bg-running px-5 py-2 text-[11px] text-running-ink">
+                {handbackNotice}
+              </p>
+            )}
+
             {currentApproval && (
               <ApprovalCard
                 approval={currentApproval}
                 busy={responding}
                 error={approvalError}
                 onRespond={respondToApproval}
+                // Takeover needs a teammate whose live browser we can drive.
+                onTakeOver={selectedTeammate ? startTakeover : null}
+                takeoverBusy={Boolean(takeoverApproval)}
               />
             )}
 
@@ -424,6 +474,8 @@ function ChatWorkspace({ chatId }) {
           <div className="hidden min-w-0 flex-[3] flex-col xl:flex">
             <SandboxPanel
               teammate={selectedTeammate}
+              takeoverApproval={takeoverApproval}
+              onHandBack={handleBrowserHandBack}
               executions={activity.data?.executions ?? []}
               handoffs={activity.data?.handoffs ?? []}
               activityLoading={activity.loading}

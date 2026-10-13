@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Activity, FolderTree, Monitor, Radio, SquareTerminal } from "lucide-react";
 import Tabs from "../ui/Tabs.jsx";
 import BrowserPane from "./BrowserPane.jsx";
@@ -23,9 +23,23 @@ export default function SandboxPanel({
   liveError = null,
   liveTaskState = "idle",
   onClearLive,
+  // Phase C: the pending approval a browser takeover answers, and the callback
+  // that resolves it when the user hands the browser back.
+  takeoverApproval = null,
+  onHandBack = null,
 }) {
   const [tab, setTab] = useState("live");
   const summary = sandboxSummary(executions);
+
+  // A takeover started from an approval card has to be visible: bring its tab
+  // to the front. Only on a *new* takeover, so a manual tab choice is kept.
+  const focusedTakeoverRef = useRef(null);
+  useEffect(() => {
+    const id = takeoverApproval?.id ?? null;
+    if (!id || focusedTakeoverRef.current === id) return;
+    focusedTakeoverRef.current = id;
+    setTab("browser");
+  }, [takeoverApproval]);
 
   const tabs = [
     { id: "live", label: "Live", icon: Radio, count: liveEvents.length || null },
@@ -55,7 +69,13 @@ export default function SandboxPanel({
           onClear={onClearLive}
         />
       )}
-      {tab === "browser" && <BrowserPane teammate={teammate} />}
+      {tab === "browser" && (
+        <BrowserPane
+          teammate={teammate}
+          takeoverApproval={takeoverApproval}
+          onHandBack={onHandBack}
+        />
+      )}
       {tab === "terminal" && (
         <TerminalPane executions={executions} loading={activityLoading} />
       )}

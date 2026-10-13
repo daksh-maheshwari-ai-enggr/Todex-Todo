@@ -10,13 +10,19 @@
 //
 // Endpoints (all reachable only through the sandbox's preview link, which the
 // backend authenticates with the sandbox's preview token):
-//   GET  /health          -> session state
+//   GET  /health          -> session state, including who currently has control
 //   POST /act             -> perform one real browser action, return its result
+//   POST /control         -> hand the wheel to the agent or to the human
+//   POST /input           -> relay raw mouse/keyboard events from the human
 //   GET  /shot            -> current viewport as a PNG data URL
 //   GET  /frames          -> Server-Sent Events stream of live JPEG frames
 //
 // Every failure is reported as { ok: false, error } with the real error message.
 // Nothing here reports success for an action that did not happen.
+//
+// Control (ROADMAP.md Phase C): exactly one driver at a time. While the human
+// holds control, every agent action is refused with a truthful error instead of
+// fighting them for the mouse. Frames keep streaming in both modes.
 
 import http from "node:http";
 import { chromium } from "playwright-core";
@@ -50,6 +56,9 @@ const FRAME_INTERVAL_MS = Number(setting("frame-interval-ms", 400));
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const DEFAULT_ACTION_TIMEOUT = 30000;
 const DEFAULT_NAV_TIMEOUT = 45000;
+// Bounds on one relayed input batch, so a runaway client cannot flood the page.
+const MAX_INPUT_EVENTS = 50;
+const MAX_INPUT_TEXT = 2000;
 
 let browser = null;
 let context = null;
@@ -59,6 +68,10 @@ let launching = null;
 let lastFrameAt = 0;
 let framesSent = 0;
 let lastError = null;
+
+// Who is driving the page right now: "agent" (the teammate's tools) or "user"
+// (the human, through the live view).
+let control = { mode: "agent", since: new Date().toISOString(), lastInputAt: null, inputEvents: 0 };
 
 const frameSubscribers = new Set();
 
@@ -90,7 +103,13 @@ function publishFrame(base64Jpeg) {
   lastFrameAt = now;
   framesSent += 1;
 
-  const payload = `data: ${JSON.stringify({ jpeg: base64Jpeg, at: new Date().toISOString() })}\n\n`;
+  const payload = `data: ${JSON.stringify({
+    jpeg: base64Jpeg,
+    at: new Date().toISOString(),
+    // The page is rendered at this size, so the client can map a click on the
+    // displayed image onto real viewport coordinates.
+    viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
+  })}\n\n`;
   for (const res of frameSubscribers) {
     try {
       res.write(payload);
@@ -220,6 +239,18 @@ async function performAction(input) {
   await ensureBrowser();
 
   const action = String(input?.action ?? "").trim();
+
+  // The human is driving: refuse rather than act behind their back. The agent
+  // gets a clear reason it can report, and nothing is silently skipped.
+  if (control.mode === "user") {
+    return {
+      ok: false,
+      code: "USER_CONTROL",
+      action,
+      error:
+        "The user currently has control of this browser. Wait for them to hand it back before acting.",
+    };
+  }
   const timeoutMs =
     action === "navigate"
       ? Number(input?.timeoutMs) || DEFAULT_NAV_TIMEOUT
@@ -426,6 +457,183 @@ async function performAction(input) {
   }
 }
 
+function controlState(extra = {}) {
+  return {
+    controlMode: control.mode,
+    controlSince: control.since,
+    lastInputAt: control.lastInputAt,
+    inputEvents: control.inputEvents,
+    viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
+    ...extra,
+  };
+}
+
+// Hand the wheel between the teammate's tools and the human at the live view.
+// Only one of them drives at a time. Releasing to the agent also lifts any mouse
+// button the human left down, so a half-finished drag cannot strand the page.
+async function setControlMode(mode) {
+  if (mode !== "user" && mode !== "agent") {
+    return { ok: false, code: "BAD_MODE", error: "mode must be 'user' or 'agent'." };
+  }
+
+  if (control.mode === mode) {
+    return controlState({ ok: true, changed: false });
+  }
+
+  control = {
+    mode,
+    since: new Date().toISOString(),
+    lastInputAt: control.lastInputAt,
+    inputEvents: control.inputEvents,
+  };
+
+  if (mode === "agent" && page && !page.isClosed()) {
+    await page.mouse.up({ button: "left" }).catch(() => {});
+    await page.mouse.up({ button: "right" }).catch(() => {});
+  }
+
+  log(`control -> ${mode}`);
+  return controlState({ ok: true, changed: true });
+}
+
+function clampCoordinate(value, limit) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.min(Math.max(Math.round(number), 0), Math.max(0, limit - 1));
+}
+
+function mouseButton(value) {
+  const button = String(value ?? "left");
+  return button === "right" || button === "middle" ? button : "left";
+}
+
+// Apply one relayed input batch from the human, in order. Coordinates are
+// clamped to the viewport and text is bounded, so a bad client cannot drive the
+// page outside its own frame. An unsupported entry is counted, never executed.
+async function performInput(body) {
+  await ensureBrowser();
+
+  const events = Array.isArray(body?.events) ? body.events : [];
+
+  if (control.mode !== "user") {
+    return {
+      ok: false,
+      code: "NO_USER_CONTROL",
+      error: "The user does not have control of this browser.",
+    };
+  }
+
+  if (events.length === 0) {
+    return { ok: false, code: "EMPTY_INPUT", error: "No input events were provided." };
+  }
+
+  const batch = events.slice(0, MAX_INPUT_EVENTS);
+  let applied = 0;
+  let ignored = events.length - batch.length;
+  let textLength = 0;
+
+  try {
+    for (const event of batch) {
+      const type = String(event?.type ?? "").trim();
+      const x = clampCoordinate(event?.x, VIEWPORT_WIDTH);
+      const y = clampCoordinate(event?.y, VIEWPORT_HEIGHT);
+
+      switch (type) {
+        case "mouse_move": {
+          if (x === null || y === null) {
+            ignored += 1;
+            break;
+          }
+          await page.mouse.move(x, y);
+          applied += 1;
+          break;
+        }
+
+        case "mouse_down":
+        case "mouse_up": {
+          if (x === null || y === null) {
+            ignored += 1;
+            break;
+          }
+          // Move first: a click must land where the user aimed, not wherever
+          // the pointer happened to be left by the previous event.
+          await page.mouse.move(x, y);
+          if (type === "mouse_down") {
+            await page.mouse.down({ button: mouseButton(event?.button) });
+          } else {
+            await page.mouse.up({ button: mouseButton(event?.button) });
+          }
+          applied += 1;
+          break;
+        }
+
+        case "wheel": {
+          if (x !== null && y !== null) await page.mouse.move(x, y);
+          await page.mouse.wheel(Number(event?.deltaX) || 0, Number(event?.deltaY) || 0);
+          applied += 1;
+          break;
+        }
+
+        case "text": {
+          const text = typeof event?.text === "string" ? event.text : "";
+          if (!text || textLength + text.length > MAX_INPUT_TEXT) {
+            ignored += 1;
+            break;
+          }
+          textLength += text.length;
+          await page.keyboard.type(text, { delay: 0 });
+          applied += 1;
+          break;
+        }
+
+        case "press": {
+          // A single character, a named key ("Enter") or a chord ("Control+A")
+          // — whichever the live view forwarded.
+          const key = typeof event?.key === "string" ? event.key : "";
+          if (!key || key.length > 40) {
+            ignored += 1;
+            break;
+          }
+          await page.keyboard.press(key);
+          applied += 1;
+          break;
+        }
+
+        case "key_down":
+        case "key_up": {
+          const key = typeof event?.key === "string" ? event.key : "";
+          if (!key || key.length > 40) {
+            ignored += 1;
+            break;
+          }
+          if (type === "key_down") await page.keyboard.down(key);
+          else await page.keyboard.up(key);
+          applied += 1;
+          break;
+        }
+
+        default:
+          ignored += 1;
+      }
+    }
+  } catch (error) {
+    lastError = `input: ${error?.message}`;
+    log("input failed:", lastError);
+    return {
+      ok: false,
+      code: "INPUT_FAILED",
+      error: String(error?.message ?? error).slice(0, 1000),
+      applied,
+      ignored,
+    };
+  }
+
+  control.lastInputAt = new Date().toISOString();
+  control.inputEvents += applied;
+
+  return controlState({ ok: true, applied, ignored });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -443,6 +651,7 @@ const server = http.createServer(async (req, res) => {
         url: summary.url,
         title: summary.title,
         lastError,
+        ...controlState(),
       });
     }
 
@@ -498,6 +707,20 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/act") {
       const body = await readBody(req);
       const result = await performAction(body);
+      return sendJson(res, result.ok ? 200 : 200, result);
+    }
+
+    // Hand the wheel over / take it back. The body is { mode: "user"|"agent" }.
+    if (req.method === "POST" && url.pathname === "/control") {
+      const body = await readBody(req);
+      const result = await setControlMode(String(body?.mode ?? "").trim());
+      return sendJson(res, result.ok ? 200 : 200, result);
+    }
+
+    // Raw mouse/keyboard relay from the human's live view (user mode only).
+    if (req.method === "POST" && url.pathname === "/input") {
+      const body = await readBody(req);
+      const result = await performInput(body);
       return sendJson(res, result.ok ? 200 : 200, result);
     }
 

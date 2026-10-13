@@ -244,26 +244,61 @@ enum AiJobStatus { QUEUED  RUNNING  WAITING_FOR_USER  SUCCEEDED  FAILED  CANCELL
 
 ## 5. Phase C — Browser takeover
 
+> **Status: implemented (2026-10-13); not yet verified.** Written per this spec
+> and compiled (server `node --check`, client `vite build` exit 0), but no
+> scenario has been run: testing is deferred at the user's request until after
+> this phase. Deviations from the spec, all deliberate:
+>
+> * Takeover requires a PENDING approval (spec's rule) and the approval must
+>   belong to the caller *and* to that teammate — enforced in
+>   `approvals.requirePendingApproval`, not just in the UI.
+> * The hand-back note is collected by the existing approval card (its Note
+>   field, whose placeholder is already "Anything the teammate should know…")
+>   instead of a bespoke prompt, so the answer still resumes the run through the
+>   one Phase A path. The chat shows a strip explaining what to do next.
+> * The overlay forwards keystrokes as `press` chords; holding a bare modifier
+>   (shift-drag selection) is not supported yet, and is stated in the code.
+> * A browser session started by a *previous* build has no `/control`, so
+>   takeover answers 409 with "restart the session, then try again" rather than
+>   silently restarting a live browser mid-task.
+
 **Goal:** when the agent stalls on login/OTP/CAPTCHA/payment, you operate the
 *same* sandbox browser, then hand control back.
 
-- `server/sandbox/browser-session.mjs` — control mode `agent | user`;
-  `POST /input` relays mouse (`page.mouse.*`) / keyboard (`page.keyboard.*`)
-  events with viewport coordinates; frames keep streaming either way.
-- `server/browser.js` — `takeBrowserControl` / `releaseBrowserControl` /
-  `relayUserInput`; while `user` mode is active, agent `browser_*` tools return
-  a truthful error ("user has control") instead of silently acting.
-- `server/routes/sandboxView.js` — `POST /:botId/desktop/control`, `POST /:botId/desktop/input` (ownership enforced).
-- `client/src/components/sandbox/BrowserPane.jsx` — interactive overlay
-  (click/scroll/type forwarding, coordinate mapping) + "Take control" / "Hand back".
-- `ApprovalCard` — "Take over browser" resolves into takeover mode; on hand-back,
-  prompt: *"What should the agent know?"* → that text becomes the approval answer.
+- `server/sandbox/browser-session.mjs` — ✅ control mode `agent | user` via
+  `POST /control`; `POST /input` relays bounded mouse (`page.mouse.*`) /
+  keyboard (`page.keyboard.*`) events with viewport coordinates; frames carry the
+  viewport size and keep streaming in both modes.
+- `server/browser.js` — ✅ `takeBrowserControl` / `releaseBrowserControl` /
+  `relayUserInput` (validated and bounded, like every other tool path); while
+  `user` mode is active the session refuses agent actions with
+  `code: USER_CONTROL`, which `browserAct` surfaces as a 409 the model can wait
+  out instead of a provider failure.
+- `server/routes/sandboxView.js` — ✅ `POST /:botId/desktop/control`,
+  `POST /:botId/desktop/input`, ownership enforced through the same
+  sandbox/bot resolution the read routes use.
+- `client/src/components/sandbox/BrowserPane.jsx` — ✅ interactive overlay
+  (click/scroll/type/paste forwarding, object-contain coordinate mapping) +
+  "Take control" / "Hand back", with a live banner while the human has the wheel.
+- `ApprovalCard` — ✅ "Take over browser" starts takeover mode and the sandbox
+  panel switches to its Browser tab; on hand-back the card collects the note and
+  resumes the run.
+
+**Files:** `server/sandbox/browser-session.mjs`, `server/browser.js`,
+`server/approvals.js`, `server/routes/sandboxView.js`,
+`client/src/components/sandbox/BrowserPane.jsx`,
+`client/src/components/sandbox/SandboxPanel.jsx`,
+`client/src/components/chat/ApprovalCard.jsx`, `client/src/pages/ChatPage.jsx`,
+`client/src/services/sandboxService.js`.
 
 ### Phase C acceptance
 
-- [ ] Hit a login wall → take over → log in → hand back → agent continues in the same session (cookies persist).
-- [ ] Agent browser tools never fight the user for control.
-- [ ] Takeover requires a PENDING approval (no drive-by control), scoped to the owning user.
+- [ ] Hit a login wall → take over → log in → hand back → agent continues in the
+      same session (cookies persist). **Not yet run.**
+- [ ] Agent browser tools never fight the user for control (refusal implemented
+      in the session itself; **not yet run**).
+- [ ] Takeover requires a PENDING approval (no drive-by control), scoped to the
+      owning user and teammate (**implemented; not yet run**).
 
 ---
 
@@ -330,6 +365,9 @@ no AI-generated commands on the host · no credential exposure to model or front
 ```
 A (pause/resume) → B (durability) → C (takeover) → D (scheduling) → E (messaging)
 ```
+
+Progress: **A done and verified · B implemented (verification partly done, remainder
+deferred) · C implemented (verification deferred) · D, E not started.**
 
 A is the spine: B makes pauses survive restarts, C removes the login blocker,
 D gives the agent its own clock, E is the first irreversible external action

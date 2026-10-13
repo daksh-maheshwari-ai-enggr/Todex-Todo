@@ -305,6 +305,11 @@ export async function getBrowserStatus({ userId, botId }) {
       title: health.title ?? null,
       framesSent: health.framesSent ?? 0,
       lastError: health.lastError ?? null,
+      // Who is driving the page right now ("agent" or "user"), and the viewport
+      // size a live-view click has to be mapped onto.
+      controlMode: health.controlMode === "user" ? "user" : "agent",
+      controlSince: health.controlSince ?? null,
+      viewport: health.viewport ?? null,
     };
   } catch (error) {
     return { ...base, lastError: error?.message ?? null };
@@ -340,7 +345,12 @@ export async function browserAct({ userId, botId, action, params = {} }) {
 
   const payload = await response.json();
   if (!payload?.ok) {
-    // The real failure is surfaced, never converted into a success.
+    // The human holds the wheel: report that as a conflict the agent can wait
+    // out, not as a provider failure. The real failure is otherwise surfaced
+    // and never converted into a success.
+    if (payload?.code === "USER_CONTROL") {
+      throw httpError(409, payload.error ?? "The user currently has control of the browser.");
+    }
     throw httpError(502, payload?.error ?? "The browser action failed.");
   }
 
@@ -414,6 +424,177 @@ export async function relayFrameStream({ userId, botId, res, signal }) {
     cleanup();
     res.end();
   }
+}
+
+// Hand the teammate's live browser to the human (ROADMAP.md Phase C).
+//
+// This is the *same* browser the agent drives, so anything the human does —
+// signing in, clearing an OTP, solving a CAPTCHA — leaves its cookies and
+// session state behind for the agent to continue with. It requires a live
+// session for the owning teammate; the sandbox preview token still never leaves
+// the server.
+export async function takeBrowserControl({ userId, botId }) {
+  const target = await ensureSession({ userId, botId });
+
+  const response = await sessionFetch(target, "/control", {
+    method: "POST",
+    body: { mode: "user" },
+    timeoutMs: config.browser.actionTimeoutMs,
+  }).catch((error) => {
+    sessions.delete(botId);
+    throw httpError(502, `The sandbox browser did not respond: ${error?.message}`);
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!payload?.ok) {
+    // A warm session from a build that predates takeover answers "unknown route".
+    // Say so plainly instead of pretending the browser is unavailable: the fix
+    // is to restart that browser session, which also must not happen silently
+    // because it would kill a live page mid-task.
+    const detail = String(payload?.error ?? "");
+    if (detail.includes("unknown route")) {
+      throw httpError(
+        409,
+        "This browser session was started before takeover support existed. Restart the teammate's browser session, then try again.",
+      );
+    }
+    throw httpError(502, payload?.error ?? "Could not take control of the browser.");
+  }
+
+  return {
+    controlMode: payload.controlMode,
+    controlSince: payload.controlSince ?? null,
+    viewport: payload.viewport ?? null,
+  };
+}
+
+// Give the wheel back to the teammate. Safe to call when the agent already has
+// it: the session reports the unchanged state instead of failing.
+export async function releaseBrowserControl({ userId, botId }) {
+  const target = await ensureSession({ userId, botId });
+
+  const response = await sessionFetch(target, "/control", {
+    method: "POST",
+    body: { mode: "agent" },
+    timeoutMs: config.browser.actionTimeoutMs,
+  }).catch((error) => {
+    sessions.delete(botId);
+    throw httpError(502, `The sandbox browser did not respond: ${error?.message}`);
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!payload?.ok) {
+    throw httpError(502, payload?.error ?? "Could not hand the browser back.");
+  }
+
+  return {
+    controlMode: payload.controlMode,
+    controlSince: payload.controlSince ?? null,
+    viewport: payload.viewport ?? null,
+  };
+}
+
+// Relay one batch of the human's raw input (mouse/keyboard) into the session.
+// Bounded and validated here as well as in the session, because this is the one
+// path that turns client data into real interaction with a page.
+const MAX_INPUT_EVENTS = 50;
+const MAX_INPUT_TEXT = 2000;
+const INPUT_TYPES = [
+  "mouse_move",
+  "mouse_down",
+  "mouse_up",
+  "wheel",
+  "text",
+  "press",
+  "key_down",
+  "key_up",
+];
+
+function validateInputEvents(events) {
+  if (!Array.isArray(events) || events.length === 0) {
+    throw httpError(400, "events must be a non-empty array.");
+  }
+
+  if (events.length > MAX_INPUT_EVENTS) {
+    throw httpError(400, `events exceeds the maximum batch size of ${MAX_INPUT_EVENTS}.`);
+  }
+
+  return events.map((event) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      throw httpError(400, "Every input event must be an object.");
+    }
+
+    const type = String(event.type ?? "");
+    if (!INPUT_TYPES.includes(type)) {
+      throw httpError(400, `Unsupported input event type: ${type || "(empty)"}.`);
+    }
+
+    const shape = { type };
+
+    if (type === "text") {
+      if (typeof event.text !== "string" || event.text.length === 0) {
+        throw httpError(400, "A text event requires text.");
+      }
+      if (event.text.length > MAX_INPUT_TEXT) {
+        throw httpError(400, `text exceeds the maximum length of ${MAX_INPUT_TEXT}.`);
+      }
+      shape.text = event.text;
+    } else if (type === "press" || type === "key_down" || type === "key_up") {
+      if (typeof event.key !== "string" || event.key.length === 0 || event.key.length > 40) {
+        throw httpError(400, "A key event requires a key of 1-40 characters.");
+      }
+      shape.key = event.key;
+    } else {
+      const x = Number(event.x);
+      const y = Number(event.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        throw httpError(400, "A pointer event requires finite x and y coordinates.");
+      }
+      shape.x = x;
+      shape.y = y;
+
+      if (type === "wheel") {
+        shape.deltaX = Number(event.deltaX) || 0;
+        shape.deltaY = Number(event.deltaY) || 0;
+      }
+
+      if (type === "mouse_down" || type === "mouse_up") {
+        const button = String(event.button ?? "left");
+        shape.button = ["left", "right", "middle"].includes(button) ? button : "left";
+      }
+    }
+
+    return shape;
+  });
+}
+
+export async function relayUserInput({ userId, botId, events }) {
+  const batch = validateInputEvents(events);
+  const target = await ensureSession({ userId, botId });
+
+  const response = await sessionFetch(target, "/input", {
+    method: "POST",
+    body: { events: batch },
+    timeoutMs: config.browser.actionTimeoutMs,
+  }).catch((error) => {
+    sessions.delete(botId);
+    throw httpError(502, `The sandbox browser did not respond: ${error?.message}`);
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!payload?.ok) {
+    // Not holding control is a client-state mistake, not a provider outage.
+    if (payload?.code === "NO_USER_CONTROL" || payload?.code === "EMPTY_INPUT") {
+      throw httpError(409, payload.error ?? "The browser is not in takeover mode.");
+    }
+    throw httpError(502, payload?.error ?? "The browser input could not be applied.");
+  }
+
+  return {
+    applied: payload.applied ?? 0,
+    ignored: payload.ignored ?? 0,
+    controlMode: payload.controlMode,
+  };
 }
 
 // Process-local view of which teammates currently have a browser session, so the

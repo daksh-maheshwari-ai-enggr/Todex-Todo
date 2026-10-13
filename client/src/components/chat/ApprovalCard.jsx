@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ShieldQuestion, X } from "lucide-react";
+import { Check, MousePointerClick, ShieldQuestion, X } from "lucide-react";
 import Badge from "../ui/Badge.jsx";
 import Button from "../ui/Button.jsx";
 import { Textarea } from "../ui/Input.jsx";
@@ -15,8 +15,20 @@ import { Textarea } from "../ui/Input.jsx";
 //
 // The question itself also exists as a normal chat message (persisted when the
 // run paused), so this card stays action-focused.
+//
+// Either shape can also be answered by *taking over the teammate's browser*
+// (Phase C): the human drives the live session through a login wall, then hands
+// it back with a note, and that note becomes the answer that resumes the run.
+// `onTakeOver` is only provided when a live browser view is available.
 
-export default function ApprovalCard({ approval, busy = false, error = null, onRespond }) {
+export default function ApprovalCard({
+  approval,
+  busy = false,
+  error = null,
+  onRespond,
+  onTakeOver = null,
+  takeoverBusy = false,
+}) {
   const [text, setText] = useState("");
 
   if (!approval) return null;
@@ -127,10 +139,32 @@ export default function ApprovalCard({ approval, busy = false, error = null, onR
             </Button>
           )}
 
+          {onTakeOver && (
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={MousePointerClick}
+              loading={takeoverBusy}
+              disabled={busy || takeoverBusy}
+              onClick={() => onTakeOver(approval)}
+              title="Open this teammate's live browser, log in yourself, then hand it back"
+            >
+              Take over browser
+            </Button>
+          )}
+
           <span className="text-[11px] text-ink-muted">
             The task continues exactly where it paused.
           </span>
         </div>
+
+        {onTakeOver && (
+          <p className="mt-2 text-[11px] leading-relaxed text-ink-muted">
+            Stuck on a login, OTP or CAPTCHA? Take over the browser to handle it yourself, then
+            hand it back — the teammate continues in the same session, cookies included. No site
+            password is ever stored by this app.
+          </p>
+        )}
 
         {error && (
           <div className="mt-2 rounded-lg border border-error-ink/20 bg-error px-3 py-2 text-[11px] text-error-ink">
