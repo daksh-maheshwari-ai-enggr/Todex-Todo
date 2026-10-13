@@ -156,10 +156,15 @@ export function toPublicJob(job) {
     attemptCount: job.attemptCount,
     maxAttempts: job.maxAttempts,
     assistantMessageId: job.assistantMessageId,
+    // How much of the job's whole-life step budget has been used (Phase B).
+    stepCount: job.stepCount ?? 0,
     // The approval a WAITING_FOR_USER job is parked on, so the UI can link
     // straight to the card that unblocks it.
     waitingForApprovalId:
       job.status === "WAITING_FOR_USER" ? job.lastApprovalId ?? null : null,
+    // When the job parked on that approval, so the UI can show how long it has
+    // been waiting. Null while the run is executing normally.
+    waitSince: job.status === "WAITING_FOR_USER" ? job.waitSince ?? null : null,
     createdAt: job.createdAt,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
@@ -334,6 +339,17 @@ export async function finishJob({
     throw httpError(404, "Job not found.");
   }
 
+  // A job parked on the human only moves on purpose: an explicit cancellation,
+  // or the resume run that answers its approval (which flips it to RUNNING
+  // first). A late reconciliation, a retried attempt or a provider failure hook
+  // must never turn "waiting for you" into SUCCEEDED or FAILED.
+  if (
+    job.status === "WAITING_FOR_USER" &&
+    (status === "SUCCEEDED" || status === "FAILED")
+  ) {
+    return job;
+  }
+
   if (isTerminalStatus(job.status)) {
     // Keep the first terminal outcome, but allow a failed/cancelled job to be
     // upgraded to SUCCEEDED only when it genuinely produced a result.
@@ -414,6 +430,8 @@ export async function listJobsForUser(userId, { limit, cursor, status } = {}) {
       maxAttempts: true,
       assistantMessageId: true,
       lastApprovalId: true,
+      stepCount: true,
+      waitSince: true,
       createdAt: true,
       startedAt: true,
       completedAt: true,
@@ -425,4 +443,102 @@ export async function listJobsForUser(userId, { limit, cursor, status } = {}) {
   const nextCursor = hasMore ? page[page.length - 1].id : null;
 
   return { jobs: page, nextCursor };
+}
+
+// Count one completed tool round against a job's lifetime step budget. Best
+// effort by design: the caller treats a failure as a missing statistic, never
+// as a reason to stop the run.
+export async function incrementJobStepCount({ jobId, by = 1 }) {
+  if (!jobId || typeof jobId !== "string") return null;
+  return prisma.aiJob.update({
+    where: { id: jobId },
+    data: { stepCount: { increment: by } },
+  });
+}
+
+// The recorded timeline of one job: every tool it actually ran and every
+// approval it raised, oldest first. Ownership is checked against the job, so a
+// foreign job id is a 404 exactly like every other job read.
+const MAX_STEPS = 100;
+
+export async function listJobSteps({ userId, jobId, limit } = {}) {
+  const job = await findJobForUser(jobId, userId);
+  if (!job) {
+    throw httpError(404, "Job not found.");
+  }
+
+  const parsedLimit = Number(limit);
+  const take = Math.min(
+    Math.max(1, Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : MAX_STEPS),
+    MAX_STEPS,
+  );
+
+  const [executions, approvals] = await Promise.all([
+    prisma.toolExecution.findMany({
+      where: { aiJobId: job.id },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take,
+      select: {
+        id: true,
+        toolName: true,
+        toolCallId: true,
+        args: true,
+        status: true,
+        result: true,
+        error: true,
+        startedAt: true,
+        completedAt: true,
+        durationMs: true,
+        createdAt: true,
+      },
+    }),
+    prisma.approvalRequest.findMany({
+      where: { aiJobId: job.id },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take,
+      select: {
+        id: true,
+        kind: true,
+        question: true,
+        toolName: true,
+        status: true,
+        response: true,
+        createdAt: true,
+        resolvedAt: true,
+      },
+    }),
+  ]);
+
+  const steps = [
+    ...executions.map((execution) => ({
+      type: "tool",
+      id: execution.id,
+      at: execution.startedAt ?? execution.createdAt,
+      toolName: execution.toolName,
+      status: execution.status,
+      args: execution.args,
+      result: execution.result,
+      error: execution.error,
+      completedAt: execution.completedAt,
+      durationMs: execution.durationMs,
+    })),
+    ...approvals.map((approval) => ({
+      type: "approval",
+      id: approval.id,
+      at: approval.createdAt,
+      approvalKind: approval.kind,
+      question: approval.question,
+      toolName: approval.toolName,
+      status: approval.status,
+      response: approval.response,
+      resolvedAt: approval.resolvedAt,
+    })),
+  ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+
+  return {
+    jobId: job.id,
+    status: job.status,
+    stepCount: job.stepCount ?? 0,
+    steps,
+  };
 }

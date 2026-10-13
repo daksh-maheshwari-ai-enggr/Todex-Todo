@@ -13,6 +13,8 @@ import { tools } from "./tools/registry.js";
 import { createHandoffTool } from "./tools/handoff.js";
 import { startToolExecution, finishToolExecution } from "./toolExecutions.js";
 import { createApproval, hasPendingApproval } from "./approvals.js";
+import { createToolMessage } from "./messages.js";
+import { incrementJobStepCount } from "./jobs.js";
 import { createHandoff, finishHandoff } from "./handoffs.js";
 import {
   activityAgentThinking,
@@ -46,6 +48,18 @@ function describeGatedAction(call) {
   }
   if (argsText.length > 400) argsText = `${argsText.slice(0, 400)}…`;
   return `The teammate wants to run ${call.name} with: ${argsText}. Approve it?`;
+}
+
+// Resolve the tool-call budget for a run. Zero is a meaningful budget (a job
+// whose lifetime step allowance is exhausted), so it must not fall back to the
+// default the way a missing value does.
+function resolveToolBudget(maxToolCalls) {
+  if (maxToolCalls === null || maxToolCalls === undefined || maxToolCalls === "") {
+    return DEFAULT_MAX_TOOL_CALLS;
+  }
+  const parsed = Number(maxToolCalls);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MAX_TOOL_CALLS;
+  return Math.floor(parsed);
 }
 
 function safeParseArgs(raw) {
@@ -93,6 +107,10 @@ const AgentState = Annotation.Root({
     reducer: (_, next) => next,
     default: () => DEFAULT_MAX_TOOL_CALLS,
   }),
+  // Wall-clock ceiling for the whole run (epoch ms, trusted and server-set).
+  // When it passes, the graph stops requesting tools and forces a truthful
+  // summary instead of being killed mid-call by the abort timer.
+  deadlineAt: Annotation({ reducer: (_, next) => next, default: () => null }),
 });
 
 // Build the model once and reuse it (and the compiled graph) across requests.
@@ -139,10 +157,56 @@ function contentToText(content) {
   return "";
 }
 
+// Parse a tool execution's stored arguments back into an object. A tool call
+// whose arguments cannot be parsed is still reconstructed (with empty args)
+// rather than dropping the result, which the model may still need.
+function parseToolArgs(raw) {
+  if (raw && typeof raw === "object") return raw;
+  if (!raw || typeof raw !== "string") return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 // Convert persisted history ({ role, content } with USER/ASSISTANT/TOOL roles)
 // into LangChain chat messages.
+//
+// Tool results are stored as TOOL rows, but providers only accept a tool result
+// that answers a preceding assistant tool_call. Those intermediate tool-call
+// messages are not persisted (the model's reasoning turns are not chat
+// content), so every consecutive run of TOOL entries is preceded here by a
+// synthesized AIMessage carrying the calls resolved by memory.js. This is what
+// lets a resumed or retried run see the work it already did instead of
+// starting over.
 function historyToMessages(history, excludeIds = null) {
   const messages = [];
+  let toolRun = [];
+
+  const flushToolRun = () => {
+    if (toolRun.length === 0) return;
+
+    messages.push(
+      new AIMessage({
+        content: "",
+        tool_calls: toolRun.map((entry) => ({
+          type: "tool_call",
+          name: entry.name,
+          args: entry.args,
+          id: entry.id,
+        })),
+      }),
+    );
+
+    for (const entry of toolRun) {
+      messages.push(new ToolMessage({ tool_call_id: entry.id, content: entry.content }));
+    }
+
+    toolRun = [];
+  };
+
   for (const entry of history || []) {
     // On a resume the approval response is re-fed as the deferred tool result,
     // so its chat message is excluded to keep chronology and avoid duplication.
@@ -150,9 +214,26 @@ function historyToMessages(history, excludeIds = null) {
     const role = String(entry?.role || "").toUpperCase();
     const content = contentToText(entry?.content);
     if (!content) continue;
+
+    if (role === "TOOL") {
+      // A tool result with no call id cannot be paired with an assistant call,
+      // so it is unusable as provider input and is skipped.
+      if (!entry.toolCallId) continue;
+      toolRun.push({
+        id: entry.toolCallId,
+        name: entry.toolName || "tool",
+        args: parseToolArgs(entry.toolArgs),
+        content,
+      });
+      continue;
+    }
+
+    flushToolRun();
     if (role === "USER") messages.push(new HumanMessage(content));
     else if (role === "ASSISTANT") messages.push(new AIMessage(content));
   }
+
+  flushToolRun();
   return messages;
 }
 
@@ -198,9 +279,22 @@ async function modelNode(state, runtimeConfig) {
     : { messages: [aiMessage] };
 }
 
-// Final node used when the tool-call cap is reached: call the model without
-// tools so it must produce a normal answer. Any pending tool calls are dropped
-// from the last AI message so the provider does not reject an unanswered call.
+// Number of tool results already produced in this run. Used for the tool-call
+// budget and for explaining why a run stopped.
+function countToolMessages(messages) {
+  return (messages || []).filter((message) => message.getType?.() === "tool").length;
+}
+
+function isPastDeadline(state) {
+  return Boolean(state.deadlineAt) && Date.now() > state.deadlineAt;
+}
+
+// Final node used when the tool-call cap or the time budget is reached: call the
+// model without tools so it must produce a normal answer. The model is told why
+// it is being stopped so the answer is an honest summary of what it completed
+// and what it did not, instead of an invented success. Any pending tool calls
+// are dropped from the last AI message so the provider does not reject an
+// unanswered call.
 async function finalizeNode(state, runtimeConfig) {
   const messages = state.messages.slice();
   const last = messages.at(-1);
@@ -210,12 +304,40 @@ async function finalizeNode(state, runtimeConfig) {
     });
   }
 
+  messages.push(new HumanMessage(describeStop(state)));
+
   const aiMessage = await chatModel.invoke(messages, runtimeConfig);
   return { messages: [aiMessage] };
 }
 
+// Why the run is being cut short, stated in the terms that actually ran out.
+function describeStop(state) {
+  const executed = countToolMessages(state.messages);
+  const maxToolCalls = resolveToolBudget(state.maxToolCalls);
+
+  const reasons = [];
+  if (isPastDeadline(state)) reasons.push("its time budget ran out");
+  if (executed >= maxToolCalls) {
+    reasons.push(
+      `the tool-call budget for this run (${maxToolCalls}) is exhausted`,
+    );
+  }
+
+  if (reasons.length === 0) {
+    return "Stop calling tools and answer now, in plain text, using what you already know.";
+  }
+
+  return [
+    `Stop calling tools and answer now, in plain text. The run was stopped because ${reasons.join(
+      " and ",
+    )}.`,
+    "Briefly state what you completed, what you did not finish, and what the user should do next.",
+    "Do not claim to have done anything you did not actually do.",
+  ].join(" ");
+}
+
 // Conditional routing after the model: run tools while the model requests them,
-// force a final answer once the cap is reached, otherwise finish the graph.
+// force a final answer once a budget is exhausted, otherwise finish the graph.
 function routeAfterModel(state) {
   // A run that just paused must end before any further model call.
   if (state.pendingApprovalId) return END;
@@ -226,19 +348,21 @@ function routeAfterModel(state) {
 
   if (!hasToolCalls) return END;
 
-  const executedToolCalls = state.messages.filter(
-    (message) => message.getType?.() === "tool",
-  ).length;
+  if (isPastDeadline(state)) return "finalize";
+
+  const executedToolCalls = countToolMessages(state.messages);
 
   const maxToolCalls = Number(state.maxToolCalls) || DEFAULT_MAX_TOOL_CALLS;
   return executedToolCalls >= maxToolCalls ? "finalize" : "tools";
 }
 
 // After a tool round: stop the graph when a human approval is pending (either
-// raised by ask_user this round or by the sensitive-action gate), otherwise
-// continue reasoning with the tool results.
+// raised by ask_user this round or by the sensitive-action gate), force a
+// summary when the time budget is gone, otherwise continue reasoning with the
+// tool results.
 function routeAfterTools(state) {
-  return state.pendingApprovalId ? END : "model";
+  if (state.pendingApprovalId) return END;
+  return isPastDeadline(state) ? "finalize" : "model";
 }
 
 // Entry routing. A resume of an APPROVED ACTION starts at the tools node so the
@@ -317,6 +441,9 @@ async function toolsExecutionNode(state, runtimeConfig) {
           toolName: call.name,
           toolCallId: call.id,
           args: call.args,
+          // Attribute the execution to its job so the job's own step timeline
+          // can be read back (jobs.listJobSteps).
+          aiJobId: state.aiJobId,
         });
         recordId = record?.id ?? null;
       } catch (error) {
@@ -335,7 +462,6 @@ async function toolsExecutionNode(state, runtimeConfig) {
       started.set(call.id, { recordId, startedAt });
     }),
   );
-
   // When calls were deferred, ToolNode must only see the runnable subset: a
   // filtered copy of the last AI message is appended purely for execution. It
   // never reaches the model because the pending approval ends the run below.
@@ -357,16 +483,20 @@ async function toolsExecutionNode(state, runtimeConfig) {
   await Promise.all(
     toolMessages.map(async (message) => {
       const info = started.get(message.tool_call_id);
+      // No execution record means the tool result cannot be reconstructed as
+      // context later (memory.js pairs a TOOL message with its ToolExecution),
+      // so nothing durable is written for it.
       if (!info?.recordId) return;
 
       const failed = message.status === "error";
+      const text = contentToText(message.content) || "(no output)";
 
       // Publish the tool's actual outcome (bounded) to the live activity stream.
       activityToolFinished({
         chatId: state.chatId,
         botId: state.botId,
         toolName: message.name ?? "tool",
-        result: contentToText(message.content),
+        result: text,
         ok: !failed,
       });
 
@@ -374,16 +504,44 @@ async function toolsExecutionNode(state, runtimeConfig) {
         await finishToolExecution({
           id: info.recordId,
           status: failed ? "FAILED" : "SUCCEEDED",
-          result: failed ? null : contentToText(message.content),
-          error: failed ? contentToText(message.content) : null,
+          result: failed ? null : text,
+          error: failed ? text : null,
           startedAt: info.startedAt,
           completedAt: new Date(),
         });
       } catch (error) {
         console.warn("Failed to record tool execution result:", error?.message);
       }
+
+      // Persist the result as durable context so a later attempt (a retry, a
+      // crash resume, or a resume after the user answers a question) continues
+      // from this work instead of repeating it. Keyed by tool-call id, so a
+      // re-executed round updates the row rather than duplicating it.
+      try {
+        await createToolMessage(
+          state.chatId,
+          state.userId,
+          {
+            content: text.slice(0, MAX_MESSAGE_LENGTH),
+            toolCallId: message.tool_call_id,
+            botId: state.botId,
+          },
+        );
+      } catch (error) {
+        console.warn("Failed to persist tool result as context:", error?.message);
+      }
     }),
   );
+
+  // Count this round against the job's lifetime step budget. One write per
+  // round and best-effort: bookkeeping must never break the run.
+  if (state.aiJobId && runnable.length > 0) {
+    try {
+      await incrementJobStepCount({ jobId: state.aiJobId, by: 1 });
+    } catch (error) {
+      console.warn("Failed to record the job's step count:", error?.message);
+    }
+  }
 
   // Whether the pause was raised by ask_user or by the sensitive-action gate,
   // the run stops here; the user's response re-enters the graph through the
@@ -401,7 +559,7 @@ const agentGraph = new StateGraph(AgentState)
   .addNode("finalize", finalizeNode)
   .addConditionalEdges(START, routeStart, ["model", "tools"])
   .addConditionalEdges("model", routeAfterModel, ["tools", "finalize", END])
-  .addConditionalEdges("tools", routeAfterTools, ["model", END])
+  .addConditionalEdges("tools", routeAfterTools, ["model", "finalize", END])
   .addEdge("finalize", END)
   .compile();
 
@@ -497,8 +655,9 @@ async function invokeGraph({
   aiJobId = null,
   resumeApproval = null,
   maxToolCalls = null,
+  deadlineAt = null,
 }) {
-  const toolBudget = Number(maxToolCalls) || DEFAULT_MAX_TOOL_CALLS;
+  const toolBudget = resolveToolBudget(maxToolCalls);
 
   const input = {
     userId,
@@ -512,6 +671,7 @@ async function invokeGraph({
     aiJobId,
     resumeApproval,
     maxToolCalls: toolBudget,
+    deadlineAt,
     pendingApprovalId: null,
     bypassToolCallIds:
       resumeApproval &&
@@ -660,8 +820,15 @@ export async function generateAgentResponse({
   resumeApproval = null,
   maxToolCalls = null,
 }) {
+  // The run gets a soft deadline: when it passes, the graph stops calling tools
+  // and produces a truthful summary. The hard abort fires later as a backstop,
+  // so a slow provider still cannot keep a run alive past its budget.
+  const deadlineAt = Date.now() + timeoutMs;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(
+    () => controller.abort(),
+    timeoutMs + config.agent.finalizeGraceMs,
+  );
   const budget = createExecutionBudget();
 
   try {
@@ -680,6 +847,7 @@ export async function generateAgentResponse({
       aiJobId,
       resumeApproval,
       maxToolCalls,
+      deadlineAt,
     });
 
     // A paused run reports the approval that stopped it so the caller can

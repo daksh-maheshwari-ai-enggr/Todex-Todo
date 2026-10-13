@@ -36,6 +36,19 @@ export async function getJob(jobId) {
   return apiRequest(`/jobs/${encodeURIComponent(jobId)}`);
 }
 
+// GET /api/jobs/:jobId/steps -> { jobId, status, stepCount, steps }. The durable
+// timeline of the job: each tool round it executed (ToolExecution) and each
+// approval it raised, oldest first. Reads the same before and after a restart.
+export async function getJobSteps(jobId) {
+  const payload = await apiRequest(`/jobs/${encodeURIComponent(jobId)}/steps`);
+  return {
+    jobId: payload.jobId,
+    status: payload.status,
+    stepCount: payload.stepCount ?? 0,
+    steps: payload.steps ?? [],
+  };
+}
+
 // POST /api/jobs/:jobId/cancel -> { job, cancelled }
 export async function cancelJob(jobId) {
   return apiRequest(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });

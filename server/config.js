@@ -116,6 +116,21 @@ export const config = {
     // background jobs get room for real multi-step tasks (bookings, research).
     maxToolCallsSync: Number(process.env.AGENT_MAX_TOOL_CALLS_SYNC) || 8,
     maxToolCallsJob: Number(process.env.AGENT_MAX_TOOL_CALLS_JOB) || 40,
+    // Extra time allowed for the final "summarize honestly" model call after a
+    // run's wall-clock deadline passes, before the abort timer kills the run.
+    finalizeGraceMs: Number(process.env.AGENT_FINALIZE_GRACE_MS) || 15000,
+  },
+  // Long-horizon durable runs (ROADMAP.md Phase B). A job is bounded twice: once
+  // per attempt by agent.maxToolCallsJob, and once over its whole life by
+  // maxSteps, which pauses and retries cannot reset.
+  job: {
+    // Total tool rounds a background job may perform across all attempts and
+    // resumes. Reaching it ends the job with a truthful summary.
+    maxSteps: Number(process.env.JOB_MAX_STEPS) || 60,
+    // Wall-clock ceiling for one job attempt. Deliberately below
+    // triggerDev.maxDurationSec so the run stops and reports instead of being
+    // killed by the provider mid-call.
+    maxDurationMs: Number(process.env.JOB_MAX_DURATION_MS) || 600000,
   },
   search: {
     // Reusable web research provider. Deliberately optional: with no key the

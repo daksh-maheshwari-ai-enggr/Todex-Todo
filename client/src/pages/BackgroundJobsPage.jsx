@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertCircle, Briefcase, Info, RefreshCw, Zap } from "lucide-react";
+import { AlertCircle, Briefcase, Info, PauseCircle, RefreshCw, Zap } from "lucide-react";
 import Topbar from "../components/layout/Topbar.jsx";
 import Card from "../components/ui/Card.jsx";
 import Button, { buttonClass } from "../components/ui/Button.jsx";
@@ -14,6 +14,7 @@ const FILTERS = [
   { id: "", label: "All" },
   { id: "QUEUED", label: "Queued" },
   { id: "RUNNING", label: "Running" },
+  { id: "WAITING_FOR_USER", label: "Waiting for you" },
   { id: "SUCCEEDED", label: "Succeeded" },
   { id: "FAILED", label: "Failed" },
   { id: "CANCELLED", label: "Cancelled" },
@@ -116,6 +117,7 @@ export default function BackgroundJobsPage() {
   }
 
   const activeCount = jobs.filter((job) => isJobActive(job.status)).length;
+  const waitingCount = jobs.filter((job) => job.status === "WAITING_FOR_USER").length;
 
   return (
     <>
@@ -143,10 +145,23 @@ export default function BackgroundJobsPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 scrollbar-slim">
         <div className="mx-auto max-w-4xl space-y-4">
+          {waitingCount > 0 && (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-running-ink/20 bg-running px-3 py-2 text-[11px] text-running-ink">
+              <PauseCircle className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="font-medium">
+                {waitingCount} job{waitingCount === 1 ? " is" : "s are"} waiting for you.
+              </span>
+              <span>
+                A parked run continues from the same step once you answer its question in the chat —
+                expand the job to jump straight to it.
+              </span>
+            </div>
+          )}
+
           {activeCount > 0 && (
             <div className="flex items-center gap-2 rounded-lg border border-line bg-running px-3 py-2 text-[11px] text-running-ink">
               <Zap className="size-3.5 shrink-0" aria-hidden="true" />
-              {activeCount} job{activeCount === 1 ? "" : "s"} still running. Statuses refresh every
+              {activeCount} job{activeCount === 1 ? "" : "s"} still active. Statuses refresh every
               5 seconds.
             </div>
           )}
@@ -212,8 +227,10 @@ export default function BackgroundJobsPage() {
             <Info className="mt-px size-3.5 shrink-0" aria-hidden="true" />
             <p>
               Jobs are dispatched by <span className="font-mono">POST /api/jobs</span> and stored in
-              the <span className="font-mono">AiJob</span> table. Cancel is only available while a
-              job is queued or running, and only when the server knows the Trigger.dev run id —
+              the <span className="font-mono">AiJob</span> table. Expanding a job loads its recorded
+              steps from <span className="font-mono">GET /api/jobs/:id/steps</span> — the tool rounds
+              it actually ran plus the approvals it raised. Cancel is available while a job is
+              queued, running or waiting, and only when the server knows the Trigger.dev run id —
               otherwise the API rejects it rather than risk a cancellation it cannot confirm.
             </p>
           </div>

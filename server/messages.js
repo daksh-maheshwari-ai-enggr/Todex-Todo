@@ -96,13 +96,60 @@ export async function createAssistantMessage(chatId, senderId, content, botId = 
   });
 }
 
+// Trusted server-side helper for recording a tool result as conversation
+// history. TOOL messages are agent working memory: they let a resumed or
+// retried run see the work it already did instead of starting over. They are
+// deliberately excluded from the chat transcript returned to clients (see
+// findMessagesByChatId) because the user-facing record of a step is the
+// ToolExecution row, not a chat bubble.
+//
+// The write is keyed by (chatId, toolCallId) so a re-executed graph node
+// updates the same row instead of writing a duplicate tool result.
+export async function createToolMessage(
+  chatId,
+  senderId,
+  { content, toolCallId, botId = null },
+  client = prisma,
+) {
+  if (typeof content !== "string" || content.trim().length === 0) {
+    throw httpError(400, "Tool content must be a non-empty string.");
+  }
+
+  if (content.length > MAX_CONTENT_LENGTH) {
+    throw httpError(400, `Content exceeds the maximum length of ${MAX_CONTENT_LENGTH} characters.`);
+  }
+
+  const data = {
+    chatId,
+    senderId,
+    role: "TOOL",
+    content: content.trim(),
+    botId: botId || null,
+    toolCallId: toolCallId || null,
+  };
+
+  if (!data.toolCallId) {
+    return client.message.create({ data });
+  }
+
+  return client.message.upsert({
+    where: { chatId_toolCallId: { chatId, toolCallId: data.toolCallId } },
+    create: data,
+    update: { content: data.content, botId: data.botId },
+  });
+}
+
 // Find the complete conversation history for a chat the user owns.
+//
+// TOOL messages are excluded: they are the agent's working memory (loaded
+// separately by memory.js), not part of the conversation the user reads.
 export async function findMessagesByChatId(chatId, userId) {
   await assertChatOwnership(chatId, userId);
 
   return prisma.message.findMany({
     where: {
       chatId,
+      role: { not: "TOOL" },
     },
     orderBy: {
       createdAt: "asc",

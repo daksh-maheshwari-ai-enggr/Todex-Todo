@@ -6,6 +6,7 @@ import {
   listBackgroundJobs,
   startBackgroundJob,
 } from "../backgroundJobs.js";
+import { listJobSteps } from "../jobs.js";
 
 const router = Router();
 
@@ -78,6 +79,25 @@ router.get("/:jobId", requireAuth, async (req, res) => {
     res.json({ job, reconciled });
   } catch (error) {
     sendError(res, error, "Failed to fetch background job.");
+  }
+});
+
+// GET /api/jobs/:jobId/steps
+// The recorded timeline of one job: the tool rounds it actually ran and the
+// approvals it raised, oldest first. This is the durable record (ToolExecution
+// + ApprovalRequest), not a live feed, so it reads the same after a restart.
+router.get("/:jobId/steps", requireAuth, async (req, res) => {
+  const { jobId } = req.params;
+
+  if (!jobId || typeof jobId !== "string") {
+    return res.status(400).json({ error: "Invalid job ID." });
+  }
+
+  try {
+    const steps = await listJobSteps({ userId: req.user.id, jobId });
+    res.json(steps);
+  } catch (error) {
+    sendError(res, error, "Failed to fetch the job's steps.");
   }
 });
 

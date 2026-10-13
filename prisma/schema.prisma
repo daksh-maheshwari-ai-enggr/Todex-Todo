@@ -87,9 +87,15 @@ model Message {
   // and for legacy/assistant messages that predate teammate attribution.
   botId       String?
   bot         Bot?      @relation("BotMessages", fields: [botId], references: [id], onDelete: SetNull)
+  // TOOL messages only: the model tool-call id this result answers. A resumed
+  // or retried run rebuilds the assistant tool_call/result pair from it, which
+  // is the shape providers require. Null for USER/ASSISTANT rows (Postgres
+  // treats nulls as distinct, so only real tool results can collide).
+  toolCallId  String?   @db.VarChar(200)
   createdAt   DateTime  @default(now())
   isRead      Boolean   @default(false)
 
+  @@unique([chatId, toolCallId])
   @@index([chatId])
   @@index([senderId])
   @@index([botId])
@@ -121,6 +127,11 @@ model ToolExecution {
   chat        Chat                @relation("ChatToolExecutions", fields: [chatId], references: [id], onDelete: Cascade)
   userId      String
   user        User                @relation("UserToolExecutions", fields: [userId], references: [id], onDelete: Cascade)
+  // The background job this execution belongs to, when it ran inside one. Null
+  // for synchronous chat turns. Used to show a job's own step timeline instead
+  // of every execution in the chat.
+  aiJobId     String?
+  aiJob       AiJob?              @relation("JobToolExecutions", fields: [aiJobId], references: [id], onDelete: SetNull)
   toolName    String              @db.VarChar(100)
   toolCallId  String?             @db.VarChar(200)
   args        String?             @db.VarChar(4000)
@@ -135,6 +146,7 @@ model ToolExecution {
   @@unique([chatId, toolCallId])
   @@index([chatId])
   @@index([userId])
+  @@index([aiJobId])
 }
 
 model ChatParticipant {
@@ -227,9 +239,12 @@ model AiJob {
   // when it started waiting. Null while the run is executing normally.
   lastApprovalId     String?     @db.VarChar(200)
   waitSince          DateTime?
-  // Number of completed tool rounds in the current run (Phase B step budget).
+  // Number of completed tool rounds for this job so far. Counted across every
+  // attempt and resume of the job, because the step budget (config.job.maxSteps)
+  // bounds the job's whole life, not one run.
   stepCount          Int         @default(0)
   approvals          ApprovalRequest[] @relation("JobApprovals")
+  toolExecutions     ToolExecution[]   @relation("JobToolExecutions")
   // Bounded success result / sanitized failure message (never a stack trace).
   result             String?     @db.VarChar(4000)
   error              String?     @db.VarChar(2000)

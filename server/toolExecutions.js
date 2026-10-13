@@ -42,6 +42,7 @@ export async function startToolExecution({
   toolName,
   toolCallId,
   args,
+  aiJobId = null,
 }) {
   const startedAt = new Date();
   const data = {
@@ -52,6 +53,7 @@ export async function startToolExecution({
     args: truncate(args, MAX_ARGS_LENGTH),
     status: "RUNNING",
     startedAt,
+    aiJobId,
   };
 
   if (data.toolCallId) {
@@ -69,6 +71,9 @@ export async function startToolExecution({
         error: null,
         completedAt: null,
         durationMs: null,
+        // Keep the job attribution of a re-executed call even when the retry
+        // itself runs outside a job context.
+        aiJobId: data.aiJobId ?? undefined,
       },
     });
   }
@@ -109,6 +114,9 @@ export async function finishToolExecution({
 
 // List tool executions for a chat the user owns, oldest first, with a bounded
 // page size and optional id-based cursor. Only safe fields are selected.
+//
+// Executions are attributed to the background job that ran them (aiJobId) when
+// there is one; the job timeline reads them by that column (see jobs.js).
 export async function listToolExecutions(chatId, userId, { limit, cursor } = {}) {
   const chat = await prisma.chat.findFirst({
     where: { id: chatId, userId },

@@ -60,6 +60,8 @@ async function defaultPersistAssistant({ chat, userId, bot, response, pendingApp
 // background runner commit the reply together with the job's terminal state.
 // `aiJobId` links pauses raised during this turn to the background job, and
 // `resumeApproval` restarts a previously paused run instead of starting fresh.
+// `maxToolCalls`/`timeoutMs` let the caller apply a job's remaining lifetime
+// budget to this attempt; both fall back to the per-mode defaults.
 export async function runChatTurn({
   bot,
   chat,
@@ -70,7 +72,10 @@ export async function runChatTurn({
   persistAssistant = defaultPersistAssistant,
   aiJobId = null,
   resumeApproval = null,
+  maxToolCalls = null,
+  timeoutMs = null,
 }) {
+  const isJob = Boolean(aiJobId);
   // 1. Persist the user message first. createMessage enforces the USER role.
   //    A resume never writes a new user message: the approval response already
   //    exists as one, and the turn continues the original request.
@@ -111,7 +116,11 @@ export async function runChatTurn({
       message: savedUserMessage?.content ?? "",
       aiJobId,
       resumeApproval,
-      maxToolCalls: aiJobId ? config.agent.maxToolCallsJob : config.agent.maxToolCallsSync,
+      maxToolCalls:
+        maxToolCalls ?? (isJob ? config.agent.maxToolCallsJob : config.agent.maxToolCallsSync),
+      // A background job may run for minutes; a chat turn must answer while the
+      // user is still on the page.
+      timeoutMs: timeoutMs ?? (isJob ? config.job.maxDurationMs : config.handoffs.timeoutMs),
     });
   } catch (error) {
     activityTaskBlocked({

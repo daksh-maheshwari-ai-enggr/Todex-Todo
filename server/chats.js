@@ -69,7 +69,10 @@ export async function findChatByIdAndUserId(chatId, userId) {
       userId,
     },
     include: {
+      // TOOL rows are agent working memory (see memory.js), not conversation, so
+      // they are excluded from the chat payload exactly like the message list.
       messages: {
+        where: { role: { not: "TOOL" } },
         orderBy: {
           createdAt: "asc",
         },

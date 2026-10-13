@@ -1,4 +1,5 @@
 import { prisma } from "./prisma.js";
+import { config } from "./config.js";
 import { runChatTurn } from "./chatTurn.js";
 import { getChatParticipantsForAgent } from "./chats.js";
 import { createMessage, createAssistantMessage } from "./messages.js";
@@ -26,6 +27,12 @@ import {
 // the owner (respondApproval), and this attempt continues the same job from the
 // synthetic tool call/result pair built from that approval instead of starting
 // a fresh turn.
+//
+// Crash safety (ROADMAP.md Phase B): every attempt re-reads the chat history,
+// which now includes the TOOL messages of the tool rounds that already ran, so a
+// retry or a re-dispatch continues the task instead of repeating completed work.
+// The user message saved by an earlier attempt is reused, and the job's
+// lifetime step budget is decremented rather than reset.
 
 // Matches the AiJob.result column limit in prisma/schema.prisma.
 const MAX_RESULT_LENGTH = 4000;
@@ -61,6 +68,21 @@ export async function runAiJob({ jobId, attemptCount = null, resumeApprovalId = 
 
   if (job.status === "CANCELLED" || job.status === "FAILED") {
     return { ok: false, jobId: job.id, status: job.status, error: job.error ?? null };
+  }
+
+  // A job already parked on an unanswered approval must not be restarted as a
+  // fresh turn. That happens when a run died badly enough to be retried after
+  // it had already paused: re-running it would redo the work and raise a second
+  // approval for the same question. The parked state stands until the owner
+  // answers, which dispatches a dedicated resume run.
+  if (job.status === "WAITING_FOR_USER" && !resumeApprovalId) {
+    return {
+      ok: true,
+      waitingForUser: true,
+      jobId: job.id,
+      status: "WAITING_FOR_USER",
+      approvalId: job.lastApprovalId ?? null,
+    };
   }
 
   // Load and validate the approval this run resumes from BEFORE the job is
@@ -137,6 +159,15 @@ export async function runAiJob({ jobId, attemptCount = null, resumeApprovalId = 
   //   * success -> assistant reply + chat timestamp + SUCCEEDED
   // A crash can therefore never leave a persisted reply against a still-running
   // job, and a retry can never write a second reply.
+  // Remaining lifetime step budget. The per-attempt tool budget is capped by
+  // what is left of the job's whole-life allowance, so pauses and retries can
+  // never buy more steps. Zero is passed through as a real budget: the run
+  // finalizes immediately with an honest summary instead of starting new work.
+  const remainingSteps = Math.max(
+    0,
+    config.job.maxSteps - (job.stepCount ?? 0),
+  );
+
   const { assistantMessage, pendingApproval } = await runChatTurn({
     bot,
     chat,
@@ -146,6 +177,8 @@ export async function runAiJob({ jobId, attemptCount = null, resumeApprovalId = 
     userMessage,
     aiJobId: job.id,
     resumeApproval,
+    maxToolCalls: Math.min(config.agent.maxToolCallsJob, remainingSteps),
+    timeoutMs: config.job.maxDurationMs,
     persistAssistant: async ({ chat: turnChat, userId: ownerId, bot: turnBot, response, pendingApproval: pause }) =>
       prisma.$transaction(async (tx) => {
         const assistant = await createAssistantMessage(

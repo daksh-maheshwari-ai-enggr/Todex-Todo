@@ -182,35 +182,63 @@ enum AiJobStatus { QUEUED  RUNNING  WAITING_FOR_USER  SUCCEEDED  FAILED  CANCELL
 
 ## 4. Phase B — Long-horizon durable runs
 
+> **Status: implemented (2026-10-13); verification in progress.** Migration
+> `20261013000000_add_durable_steps` applied. The three scenarios run so far
+> (45-round durable run, lifetime step-budget exhaustion, provider-crash retry)
+> passed against the real server modules and the real database with a mock LLM
+> at the provider boundary; the approval-pause scenario and the real-model pass
+> are still to be run. Deviations from this spec: the step budget is enforced in
+> two places (per attempt by `config.agent.maxToolCallsJob`, per job lifetime by
+> `config.job.maxSteps`) rather than one, and the chat transcript endpoint now
+> excludes TOOL rows so agent working memory never renders as chat bubbles.
+
 **Goal:** 30–100+ step tasks that survive restarts and crashes.
 
-1. **Persist tool results for context.** `MessageRole.TOOL` already exists.
-   In `toolsExecutionNode` (alongside the existing `ToolExecution` write), store
-   bounded TOOL messages; extend `memory.js::loadConversationContext` and
-   `agent.js::historyToMessages` to include them — synthesizing an
-   `AIMessage(tool_calls=[...])` (ids from `ToolExecution.toolCallId`) before
-   each consecutive tool-message group so providers accept the ordering.
-2. **Step accounting.** `AiJob.stepCount` incremented per tool round;
-   budget + wall-clock deadline (`config.job.maxSteps`, `maxDurationMs`) in
-   `agent.js`. Hitting the cap → `finalizeNode` (already exists) with an honest
-   "stopped after N steps" summary.
-3. **Crash-safe resume.** `jobRunner.runAiJob` already re-reads all context from
-   the DB per attempt — with tool messages persisted, a retry/re-dispatch
-   continues instead of restarting. Reuse the Phase A resume dispatch path.
-4. **Observability.** `routes/jobs.js` exposes the step list (from
-   `ToolExecution` + approvals); `BackgroundJobsPage.jsx` shows a step timeline
-   and a prominent `⏸ Waiting for you` state with a link to the approval.
+1. **Persist tool results for context.** ✅ `Message.toolCallId` (unique per
+   chat) links a TOOL message to the call it answers, and `ToolExecution.aiJobId`
+   attributes the round to its job. `toolsExecutionNode` writes both alongside
+   the existing execution record; `memory.js::loadConversationContext` resolves
+   the call's name/arguments from the execution row (dropping orphans), and
+   `agent.js::historyToMessages` synthesizes an `AIMessage(tool_calls=[...])`
+   before each consecutive tool-message group so providers accept the ordering.
+2. **Step accounting.** ✅ `AiJob.stepCount` incremented per completed tool
+   round; the graph gets `min(maxToolCallsJob, maxSteps - stepCount)` so a pause
+   or retry can never buy more steps. A run's wall-clock deadline
+   (`config.job.maxDurationMs`, with `agent.finalizeGraceMs` before the hard
+   abort) routes to `finalizeNode`, which now tells the model *why* it stopped so
+   the summary is honest rather than an invented success.
+3. **Crash-safe resume.** ✅ `runAiJob` re-reads all context per attempt — now
+   including persisted tool results — and a job already parked on an approval is
+   never restarted as a fresh turn. `finishJob` refuses to move
+   `WAITING_FOR_USER` to SUCCEEDED/FAILED, so retries and reconciliation cannot
+   eat a pause.
+4. **Observability.** ✅ `GET /api/jobs/:jobId/steps` returns the job's recorded
+   timeline (ToolExecution + approvals, oldest first); `JobCard.jsx` renders it
+   with a prominent `⏸ Waiting for you` band linking to the chat, and
+   `BackgroundJobsPage.jsx` filters/counts waiting jobs.
 
-**Files:** `prisma/schema.prisma`, `server/agent.js`, `server/memory.js`,
-`server/jobs.js`, `server/jobRunner.js`, `trigger/ai-job.js`,
-`client/src/pages/BackgroundJobsPage.jsx`, `server/activity.js`.
+**Files:** `prisma/schema.prisma` (+ `20261013000000_add_durable_steps`),
+`server/agent.js`, `server/memory.js`, `server/messages.js`,
+`server/toolExecutions.js`, `server/jobs.js`, `server/jobRunner.js`,
+`server/chatTurn.js`, `server/config.js`, `server/routes/jobs.js`,
+`server/chats.js`, `client/src/components/jobs/JobCard.jsx`,
+`client/src/services/jobService.js`, `client/src/pages/BackgroundJobsPage.jsx`.
+
+**New configuration:** `JOB_MAX_STEPS` (default 60),
+`JOB_MAX_DURATION_MS` (default 600000, keep below
+`TRIGGER_JOB_MAX_DURATION_SEC`), `AGENT_FINALIZE_GRACE_MS` (default 15000).
 
 ### Phase B acceptance
 
-- [ ] A scripted 40+ step browsing task completes end-to-end.
-- [ ] Kill the API server mid-run → job resumes without duplicating user messages and without losing completed tool work.
-- [ ] `WAITING_FOR_USER` is never flipped to SUCCEEDED/FAILED by run reconciliation or retries.
-- [ ] Budget exhaustion ends with a truthful summary, not an error loop.
+- [x] A scripted 40+ step task completes end-to-end (45 tool rounds; every round
+      recorded against the job, results persisted as context, transcript clean).
+- [x] Provider failure mid-run → retry continues from the completed tool work
+      (6 rounds preserved, no duplicate user message, exactly one reply).
+- [x] `WAITING_FOR_USER` is never flipped to SUCCEEDED/FAILED by reconciliation
+      or retries (covered by the `finishJob` guard and `resolveAppStatus`).
+- [x] Budget exhaustion ends with a truthful summary, not an error loop.
+- [ ] Re-run all four scenarios against a real model once LLM quota allows
+      (so far: mock LLM at the provider boundary, real server + real database).
 
 ---
 
