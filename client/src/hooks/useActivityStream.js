@@ -84,9 +84,14 @@ export function useActivityStream(chatId, { enabled = true } = {}) {
   }, [chatId, enabled, append]);
 
   // The task state is derived from the latest lifecycle event, not from a timer.
+  // approval.resolved means the human answered and the run continues, so it
+  // reads as running again; approval.pending parks the task as blocked (it
+  // needs the user, not the model).
   const taskState = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const type = events[i]?.type;
+      if (type === "approval.resolved") return "running";
+      if (type === "approval.pending") return "blocked";
       if (type === "task.completed") return "completed";
       if (type === "task.blocked") return "blocked";
       if (type === "task.started" || type === "agent.thinking") return "running";

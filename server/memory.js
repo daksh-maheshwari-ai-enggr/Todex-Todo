@@ -43,12 +43,14 @@ export async function loadConversationContext({
   const limit = Math.max(1, Number(maxMessages) || config.memory.maxHistoryMessages);
 
   // Take the most recent `limit` messages, then reverse into chronological
-  // order so the agent sees oldest -> newest.
+  // order so the agent sees oldest -> newest. Ids are included so a resume can
+  // exclude the approval-response message (which is re-fed as the deferred tool
+  // result instead of appearing twice in the context).
   const recent = await prisma.message.findMany({
     where: { chatId },
     orderBy: { createdAt: "desc" },
     take: limit,
-    select: { role: true, content: true },
+    select: { id: true, role: true, content: true },
   });
 
   recent.reverse();

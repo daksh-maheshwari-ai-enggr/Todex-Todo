@@ -7,6 +7,7 @@ import {
   AI_JOB_TASK_ID,
   applyRunState,
   attachRun,
+  attachResumeRun,
   createJob,
   findJobForUser,
   finishJob,
@@ -18,6 +19,7 @@ import {
   sanitizeError,
   toPublicJob,
 } from "./jobs.js";
+import { cancelPendingApprovals } from "./approvals.js";
 
 // Trigger.dev is the durable execution layer; Express stays the API layer.
 //
@@ -150,6 +152,37 @@ export async function startBackgroundJob({ userId, botId, chatId, message, idemp
   }
 }
 
+// Resume a job that was parked on a human approval: dispatch a fresh run for
+// the same job carrying the resolved approval id. The caller has already
+// resolved the approval (respondApproval verified ownership). The idempotency
+// key is per-approval so a double-click can never start two resume runs.
+export async function resumeBackgroundJob({ userId, job, approval }) {
+  assertNonEmptyString(job?.id, "jobId");
+  assertNonEmptyString(approval?.id, "approvalId");
+  assertConfigured();
+
+  try {
+    const handle = await tasks.trigger(
+      AI_JOB_TASK_ID,
+      { jobId: job.id, resumeApprovalId: approval.id },
+      {
+        idempotencyKey: `ai-job-resume:${approval.id}`,
+        maxAttempts: job.maxAttempts,
+        tags: [`user:${userId}`, `job:${job.id}`],
+      },
+    );
+
+    // Persist the new run id and flip WAITING_FOR_USER -> RUNNING. If this
+    // write fails the job stays parked but the run is idempotent, so the next
+    // response can dispatch again without duplicating work.
+    const attached = await attachResumeRun({ jobId: job.id, runId: handle.id });
+    return { job: toPublicJob(attached) };
+  } catch (error) {
+    console.error("Failed to dispatch approval resume:", error?.message);
+    throw httpError(503, "Failed to resume the background job.");
+  }
+}
+
 // Retrieve one of the authenticated user's own jobs, actively reconciling the
 // application status with Trigger.dev while the run is still active.
 export async function getBackgroundJob({ userId, jobId }) {
@@ -216,6 +249,23 @@ export async function cancelBackgroundJob({ userId, jobId }) {
     return { job: toPublicJob(job), cancelled: false };
   }
 
+  // A job parked on an approval has no live Trigger run (its run ended
+  // normally on purpose), so cancellation happens locally — and its pending
+  // approval must die with it, otherwise answering the card later could try to
+  // resume a cancelled job.
+  if (job.status === "WAITING_FOR_USER") {
+    await cancelPendingApprovals({
+      aiJobId: job.id,
+      reason: "The job was cancelled.",
+    });
+    const cancelled = await finishJob({
+      jobId: job.id,
+      status: "CANCELLED",
+      runStatus: "CANCELED",
+    });
+    return { job: toPublicJob(cancelled), cancelled: true };
+  }
+
   assertConfigured();
 
   if (!job.runId) {
@@ -237,6 +287,13 @@ export async function cancelBackgroundJob({ userId, jobId }) {
 
   // The cancellation was accepted. The run may still be tearing down, so the
   // stored run status is recorded as CANCELED and the next read reconciles.
+  // Any approval the run parked on (a race with an answering pause) is dropped
+  // for the same reason as above.
+  await cancelPendingApprovals({
+    aiJobId: job.id,
+    reason: "The job was cancelled.",
+  });
+
   const cancelled = await finishJob({
     jobId: job.id,
     status: "CANCELLED",

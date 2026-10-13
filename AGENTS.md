@@ -128,6 +128,11 @@ The planned development sequence is:
 10. Isolated sandbox and desktop control
 11. Durable background execution and usage metering
 12. Production hardening and deployment
+13. Human-in-the-loop: approvals, ask_user tool, pause/resume (see ROADMAP.md Phase A)
+14. Long-horizon durable runs with persisted tool context (ROADMAP.md Phase B)
+15. Browser takeover: user drives the sandbox browser while the agent waits (ROADMAP.md Phase C)
+16. Scheduling and proactive tasks (ROADMAP.md Phase D)
+17. External actions: Gmail messaging with send approval gate (ROADMAP.md Phase E)
 
 Do not implement later phases unless explicitly requested.
 

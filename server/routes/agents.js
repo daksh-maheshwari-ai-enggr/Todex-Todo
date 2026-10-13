@@ -4,6 +4,7 @@ import { prisma } from "../prisma.js";
 import { MAX_MESSAGE_LENGTH } from "../agent.js";
 import { runChatTurn } from "../chatTurn.js";
 import { getChatParticipantsForAgent } from "../chats.js";
+import { toPublicApproval } from "../approvals.js";
 
 const router = Router();
 
@@ -81,7 +82,7 @@ router.post("/:botId/respond", requireAuth, async (req, res) => {
   // Run the turn. Provider failures are reported without leaking internals, and
   // the already-saved user message is returned so the client can reconcile.
   try {
-    const { userMessage, assistantMessage } = await runChatTurn({
+    const { userMessage, assistantMessage, pendingApproval } = await runChatTurn({
       bot,
       chat,
       userId: req.user.id,
@@ -89,10 +90,14 @@ router.post("/:botId/respond", requireAuth, async (req, res) => {
       participants,
     });
 
+    // A paused turn returns 201 with the approval instead of a completion: the
+    // question is persisted as the assistant reply, and the client shows the
+    // approval card. The continuation arrives through POST /:id/respond.
     return res.status(201).json({
       response: assistantMessage.content,
       userMessage,
       assistantMessage,
+      pendingApproval: pendingApproval ? toPublicApproval(pendingApproval) : null,
     });
   } catch (error) {
     const userMessage = error?.userMessage;

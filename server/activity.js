@@ -39,6 +39,8 @@ export const ACTIVITY_TYPES = {
   handoffFinished: "handoff.finished",
   taskCompleted: "task.completed",
   taskBlocked: "task.blocked",
+  approvalPending: "approval.pending",
+  approvalResolved: "approval.resolved",
 };
 
 function nextEventId() {
@@ -200,5 +202,32 @@ export function activityTaskBlocked({ chatId, botId, reason }) {
     status: "blocked",
     title: "Task blocked",
     detail: short(reason, 400),
+  });
+}
+
+// Emitted when a run actually paused on a human approval (the approval row
+// exists at this point) — not when a question was merely asked of the model.
+export function activityApprovalPending({ chatId, botId, approval }) {
+  return emitActivity(chatId, {
+    type: ACTIVITY_TYPES.approvalPending,
+    botId,
+    status: "waiting",
+    title:
+      approval?.kind === "ACTION" ? "Waiting for your approval" : "Waiting for your answer",
+    detail: short(approval?.question, 300),
+    data: approval ? { approvalId: approval.id, kind: approval.kind } : null,
+  });
+}
+
+// Emitted after the owner responded; the run resumes right after this point.
+export function activityApprovalResolved({ chatId, botId, approval }) {
+  return emitActivity(chatId, {
+    type: ACTIVITY_TYPES.approvalResolved,
+    botId,
+    status: approval?.status === "REJECTED" ? "rejected" : "approved",
+    title:
+      approval?.status === "REJECTED" ? "Action rejected" : "Approval given — resuming",
+    detail: short(approval?.response, 300),
+    data: approval ? { approvalId: approval.id, kind: approval.kind } : null,
   });
 }

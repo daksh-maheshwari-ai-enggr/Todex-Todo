@@ -23,6 +23,7 @@ import Input from "../components/ui/Input.jsx";
 import ChatHeader from "../components/chat/ChatHeader.jsx";
 import MessageList from "../components/chat/MessageList.jsx";
 import Composer from "../components/chat/Composer.jsx";
+import ApprovalCard from "../components/chat/ApprovalCard.jsx";
 import SandboxPanel from "../components/sandbox/SandboxPanel.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
 import { useAsync } from "../hooks/useAsync.js";
@@ -40,6 +41,7 @@ import {
   updateChat,
 } from "../services/chatService.js";
 import { listToolExecutions } from "../services/toolExecutionService.js";
+import { listApprovals, respondApproval } from "../services/approvalService.js";
 import { listTeammates } from "../services/teammateService.js";
 import { getJob, startJob } from "../services/jobService.js";
 import { formatRelativeTime } from "../utils/format.js";
@@ -64,6 +66,9 @@ function ChatWorkspace({ chatId }) {
   const messages = useAsync(() => listMessages(chatId), [chatId]);
   const participants = useAsync(() => listParticipants(chatId), [chatId]);
   const teammates = useAsync(() => listTeammates(), []);
+  // Pending human-in-the-loop approvals: while any exist, the teammate's run
+  // is parked and this chat's composer is read-only until one is answered.
+  const approvals = useAsync(() => listApprovals(chatId), [chatId]);
 
   const activity = useAsync(
     async () => {
@@ -85,6 +90,11 @@ function ChatWorkspace({ chatId }) {
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState(null);
   const [activeJob, setActiveJob] = useState(null);
+  const [responding, setResponding] = useState(false);
+  const [approvalError, setApprovalError] = useState(null);
+
+  const pendingApprovals = approvals.data ?? [];
+  const currentApproval = pendingApprovals[0] ?? null;
 
   // Chat management (rename / delete) uses the existing PATCH and DELETE routes.
   const [renameOpen, setRenameOpen] = useState(false);
@@ -128,14 +138,19 @@ function ChatWorkspace({ chatId }) {
   });
 
   // While a background job is active, poll its status; when it finishes, pull in
-  // the messages and activity the worker persisted.
+  // the messages and activity the worker persisted. Approvals are re-read on
+  // every tick so a pause raised by the worker appears without a reload.
   usePolling(
     async () => {
       if (!activeJob) return;
       try {
         const { job } = await getJob(activeJob.id);
+        const previousStatus = activeJob.status;
         setActiveJob(job);
-        if (!isJobActive(job.status)) {
+        await approvals.refetch({ silent: true });
+        const resumed =
+          previousStatus === "WAITING_FOR_USER" && job.status === "RUNNING";
+        if (!isJobActive(job.status) || resumed) {
           await Promise.all([
             messages.refetch({ silent: true }),
             activity.refetch({ silent: true }),
@@ -155,7 +170,37 @@ function ChatWorkspace({ chatId }) {
       activity.refetch({ silent: true }),
       chat.refetch({ silent: true }),
       participants.refetch({ silent: true }),
+      approvals.refetch({ silent: true }),
     ]);
+  }
+
+  // Answer/approve a paused run. The response resolves the approval server-side
+  // and resumes the same run; a job-backed pause re-enters polling above.
+  async function respondToApproval(approval, payload) {
+    setResponding(true);
+    setApprovalError(null);
+    try {
+      const { resumed } = await respondApproval(approval.id, payload);
+      if (resumed?.id) {
+        setActiveJob(resumed);
+      } else if (approval.aiJobId) {
+        // Inline resume (Trigger.dev not configured): read the job back so the
+        // banner and polling reflect its post-resume state.
+        try {
+          const { job } = await getJob(approval.aiJobId);
+          setActiveJob(job);
+        } catch {
+          // Job display only; the messages below are authoritative.
+        }
+      }
+      await refreshAll();
+      return true;
+    } catch (error) {
+      setApprovalError(error?.message ?? "Could not send your response.");
+      return false;
+    } finally {
+      setResponding(false);
+    }
   }
 
   async function submitRename(event) {
@@ -350,6 +395,15 @@ function ChatWorkspace({ chatId }) {
               }
             />
 
+            {currentApproval && (
+              <ApprovalCard
+                approval={currentApproval}
+                busy={responding}
+                error={approvalError}
+                onRespond={respondToApproval}
+              />
+            )}
+
             <Composer
               participants={participantBots}
               selectedBotId={selectedBotId}
@@ -357,9 +411,13 @@ function ChatWorkspace({ chatId }) {
               onSend={send}
               onSendBackground={sendBackground}
               sending={sending}
-              disabled={participantBots.length === 0}
+              disabled={participantBots.length === 0 || pendingApprovals.length > 0}
               backgroundAvailable
-              error={null}
+              error={
+                pendingApprovals.length > 0
+                  ? "Your teammate is waiting for your answer above — respond there to continue the task."
+                  : null
+              }
             />
           </section>
 

@@ -21,6 +21,11 @@ import {
 // decides retry policy and owns the failure hooks. `jobId` is the only input,
 // and every piece of trusted context (owner, chat, teammate, message) is loaded
 // from the database rather than trusted from a payload.
+//
+// `resumeApprovalId` marks a resumed run: the approval was already resolved by
+// the owner (respondApproval), and this attempt continues the same job from the
+// synthetic tool call/result pair built from that approval instead of starting
+// a fresh turn.
 
 // Matches the AiJob.result column limit in prisma/schema.prisma.
 const MAX_RESULT_LENGTH = 4000;
@@ -32,7 +37,7 @@ function jobError(status, message, retryable = false) {
   return error;
 }
 
-export async function runAiJob({ jobId, attemptCount = null }) {
+export async function runAiJob({ jobId, attemptCount = null, resumeApprovalId = null }) {
   if (!jobId || typeof jobId !== "string") {
     throw jobError(400, "A job id is required.");
   }
@@ -56,6 +61,28 @@ export async function runAiJob({ jobId, attemptCount = null }) {
 
   if (job.status === "CANCELLED" || job.status === "FAILED") {
     return { ok: false, jobId: job.id, status: job.status, error: job.error ?? null };
+  }
+
+  // Load and validate the approval this run resumes from BEFORE the job is
+  // marked running, so an invalid resume can never leave the job parked in
+  // RUNNING with no attempt behind it. The approval must belong to this job and
+  // must already be resolved — a still-pending one means the response never
+  // landed and the run must not continue past the gate.
+  let resumeApproval = null;
+  if (resumeApprovalId) {
+    const approval = await prisma.approvalRequest.findFirst({
+      where: { id: resumeApprovalId, aiJobId: job.id },
+    });
+    if (!approval) {
+      throw jobError(404, "The approval for this job no longer exists.");
+    }
+    if (approval.status === "PENDING") {
+      throw jobError(409, "The approval has not been answered yet.");
+    }
+    if (approval.status !== "APPROVED" && approval.status !== "REJECTED") {
+      throw jobError(409, "The approval is no longer resumable.");
+    }
+    resumeApproval = approval;
   }
 
   const running = await markJobRunning({ jobId: job.id, attemptCount });
@@ -103,19 +130,23 @@ export async function runAiJob({ jobId, attemptCount = null }) {
     await setJobUserMessage({ jobId: job.id, userMessageId: userMessage.id });
   }
 
-  // Run the turn through the shared orchestration. The only background-specific
-  // behaviour is the finalize step: the assistant reply, the chat timestamp and
-  // the job's terminal state are committed in one transaction so a crash can
-  // never leave a persisted reply against a still-running job, and a retry can
-  // never write a second reply.
-  const { assistantMessage } = await runChatTurn({
+  // Run the turn through the shared orchestration. The only job-specific
+  // behaviour is the finalize step, which commits in one transaction:
+  //   * paused  -> question message + approval link + WAITING_FOR_USER (never a
+  //                terminal status, so retries/reconciliation cannot eat it)
+  //   * success -> assistant reply + chat timestamp + SUCCEEDED
+  // A crash can therefore never leave a persisted reply against a still-running
+  // job, and a retry can never write a second reply.
+  const { assistantMessage, pendingApproval } = await runChatTurn({
     bot,
     chat,
     userId: job.userId,
     message: job.message,
     participants,
     userMessage,
-    persistAssistant: async ({ chat: turnChat, userId: ownerId, bot: turnBot, response }) =>
+    aiJobId: job.id,
+    resumeApproval,
+    persistAssistant: async ({ chat: turnChat, userId: ownerId, bot: turnBot, response, pendingApproval: pause }) =>
       prisma.$transaction(async (tx) => {
         const assistant = await createAssistantMessage(
           turnChat.id,
@@ -129,6 +160,36 @@ export async function runAiJob({ jobId, attemptCount = null }) {
           where: { id: turnChat.id },
           data: { updatedAt: new Date() },
         });
+
+        if (pause) {
+          // Park the job on the approval: link both sides and keep it active.
+          await tx.approvalRequest.update({
+            where: { id: pause.id },
+            data: { assistantMessageId: assistant.id },
+          });
+
+          const parked = await tx.aiJob.updateMany({
+            where: {
+              id: job.id,
+              status: { notIn: ["CANCELLED", "FAILED", "SUCCEEDED"] },
+            },
+            data: {
+              status: "WAITING_FOR_USER",
+              assistantMessageId: assistant.id,
+              lastApprovalId: pause.id,
+              waitSince: new Date(),
+              result: null,
+              error: null,
+              completedAt: null,
+            },
+          });
+
+          if (parked.count === 0) {
+            throw jobError(409, "Job was cancelled before it could pause.");
+          }
+
+          return assistant;
+        }
 
         // Guarded write: a job cancelled mid-turn must not be resurrected into
         // SUCCEEDED, and in that case the whole transaction is rolled back so
@@ -154,6 +215,19 @@ export async function runAiJob({ jobId, attemptCount = null }) {
         return assistant;
       }),
   });
+
+  // Parked on a human approval: this attempt ends successfully from Trigger's
+  // point of view while the application job stays WAITING_FOR_USER until the
+  // approval is answered (then a fresh resume run continues it).
+  if (pendingApproval) {
+    return {
+      ok: true,
+      waitingForUser: true,
+      jobId: job.id,
+      status: "WAITING_FOR_USER",
+      approvalId: pendingApproval.id,
+    };
+  }
 
   return {
     ok: true,

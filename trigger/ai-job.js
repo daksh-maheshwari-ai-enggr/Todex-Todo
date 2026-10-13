@@ -53,6 +53,10 @@ export const aiTeammateJob = task({
     return runAiJob({
       jobId,
       attemptCount: ctx?.attempt?.number ?? null,
+      // Present only on a resume run dispatched after the owner answered an
+      // approval; validated against the job inside the runner.
+      resumeApprovalId:
+        typeof payload?.resumeApprovalId === "string" ? payload.resumeApprovalId : null,
     });
   },
 

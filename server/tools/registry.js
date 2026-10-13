@@ -12,6 +12,7 @@ import {
 } from "./sandbox.js";
 import { browserTools } from "./browser.js";
 import { webSearchTool } from "./search.js";
+import { askUserTool } from "./askUser.js";
 
 // Central tool registry. Add new tools here to make them available to the
 // agent; the graph binds whatever this module exports. Each tool declares its
@@ -32,6 +33,8 @@ export const tools = [
   ...browserTools,
   // Web research (discovery), separate from browsing (inspection)
   webSearchTool,
+  // Human-in-the-loop: pause the run and put the question in front of the user
+  askUserTool,
 ];
 
 export default tools;

@@ -4,6 +4,7 @@ import {
   SystemMessage,
   HumanMessage,
   AIMessage,
+  ToolMessage,
   isAIMessage,
 } from "@langchain/core/messages";
 import { createChatModel } from "./openrouter.js";
@@ -11,6 +12,7 @@ import { config } from "./config.js";
 import { tools } from "./tools/registry.js";
 import { createHandoffTool } from "./tools/handoff.js";
 import { startToolExecution, finishToolExecution } from "./toolExecutions.js";
+import { createApproval, hasPendingApproval } from "./approvals.js";
 import { createHandoff, finishHandoff } from "./handoffs.js";
 import {
   activityAgentThinking,
@@ -23,11 +25,38 @@ import {
 // Message.content column limit in prisma/schema.prisma.
 export const MAX_MESSAGE_LENGTH = 4000;
 
-// Safety cap on the number of tool executions in one turn. Once reached, the
-// graph stops requesting tools and forces a plain final answer instead of
-// looping forever. `recursionLimit` below is a second backstop.
-const MAX_TOOL_CALLS = 8;
-const GRAPH_RECURSION_LIMIT = 25;
+// Per-turn tool-call cap when no explicit budget is supplied (see
+// config.agent). The graph stops requesting tools once reached and forces a
+// plain final answer; the invoke-time `recursionLimit` is a second backstop.
+const DEFAULT_MAX_TOOL_CALLS = config.agent.maxToolCallsSync;
+
+// Tool names that must never run without an explicit user approval. Read from
+// config so operators can widen the set (e.g. APPROVAL_GATED_TOOLS=sandbox_execute_command).
+function isGatedTool(toolName) {
+  return config.approvals.gatedTools.includes(String(toolName || ""));
+}
+
+// Human-readable description of a deferred action, shown on the approval card.
+function describeGatedAction(call) {
+  let argsText = "";
+  try {
+    argsText = JSON.stringify(call.args ?? {});
+  } catch {
+    argsText = String(call.args ?? "");
+  }
+  if (argsText.length > 400) argsText = `${argsText.slice(0, 400)}…`;
+  return `The teammate wants to run ${call.name} with: ${argsText}. Approve it?`;
+}
+
+function safeParseArgs(raw) {
+  if (!raw || typeof raw !== "string") return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
 
 // LangGraph state definition for the agent workflow.
 const AgentState = Annotation.Root({
@@ -50,6 +79,19 @@ const AgentState = Annotation.Root({
   messages: Annotation({
     reducer: (current, next) => current.concat(next),
     default: () => [],
+  }),
+  // Human-in-the-loop pause state (trusted, server-set — never model output):
+  // the background job this run belongs to (null for synchronous chat turns),
+  // the approval being resumed (when the run was restarted by a user response),
+  // the id of the approval that paused the run after a tool round, and the
+  // gated tool-call ids an APPROVED ACTION resume is allowed to execute.
+  aiJobId: Annotation({ reducer: (_, next) => next, default: () => null }),
+  resumeApproval: Annotation({ reducer: (_, next) => next, default: () => null }),
+  pendingApprovalId: Annotation({ reducer: (_, next) => next, default: () => null }),
+  bypassToolCallIds: Annotation({ reducer: (_, next) => next, default: () => [] }),
+  maxToolCalls: Annotation({
+    reducer: (_, next) => next,
+    default: () => DEFAULT_MAX_TOOL_CALLS,
   }),
 });
 
@@ -78,6 +120,7 @@ export function buildSystemPrompt(botJob, botInstructions, participants = [], bo
     botInstructions ? `Instructions:\n${botInstructions}` : "",
     "You are an assistant that responds to user messages in the context of the bot's job and instructions. Respond as concisely as possible.",
     "You may call the available tools to manage the user's tasks. Only call a tool when it is genuinely needed, and use the results to answer.",
+    "When a step genuinely needs the human — signing in (password/OTP), paying or confirming a purchase, sending a message on the user's behalf, deleting data, or a choice you must not guess — call ask_user with a short, concrete question and offer options. Then continue with the answer you receive as the tool result. Never claim the user approved, sent or booked anything they did not.",
     teammateList
       ? `You can delegate work to these teammates by calling handoff_to_teammate with the teammate id and a clear task:\n${teammateList}`
       : "",
@@ -98,9 +141,12 @@ function contentToText(content) {
 
 // Convert persisted history ({ role, content } with USER/ASSISTANT/TOOL roles)
 // into LangChain chat messages.
-function historyToMessages(history) {
+function historyToMessages(history, excludeIds = null) {
   const messages = [];
   for (const entry of history || []) {
+    // On a resume the approval response is re-fed as the deferred tool result,
+    // so its chat message is excluded to keep chronology and avoid duplication.
+    if (excludeIds && entry?.id && excludeIds.has(entry.id)) continue;
     const role = String(entry?.role || "").toUpperCase();
     const content = contentToText(entry?.content);
     if (!content) continue;
@@ -171,6 +217,9 @@ async function finalizeNode(state, runtimeConfig) {
 // Conditional routing after the model: run tools while the model requests them,
 // force a final answer once the cap is reached, otherwise finish the graph.
 function routeAfterModel(state) {
+  // A run that just paused must end before any further model call.
+  if (state.pendingApprovalId) return END;
+
   const last = state.messages.at(-1);
   const hasToolCalls =
     isAIMessage(last) && Array.isArray(last.tool_calls) && last.tool_calls.length > 0;
@@ -181,7 +230,26 @@ function routeAfterModel(state) {
     (message) => message.getType?.() === "tool",
   ).length;
 
-  return executedToolCalls >= MAX_TOOL_CALLS ? "finalize" : "tools";
+  const maxToolCalls = Number(state.maxToolCalls) || DEFAULT_MAX_TOOL_CALLS;
+  return executedToolCalls >= maxToolCalls ? "finalize" : "tools";
+}
+
+// After a tool round: stop the graph when a human approval is pending (either
+// raised by ask_user this round or by the sensitive-action gate), otherwise
+// continue reasoning with the tool results.
+function routeAfterTools(state) {
+  return state.pendingApprovalId ? END : "model";
+}
+
+// Entry routing. A resume of an APPROVED ACTION starts at the tools node so the
+// deferred call is executed for real (its result must never be faked); every
+// other entry starts at the model.
+function routeStart(state) {
+  const approval = state.resumeApproval;
+  if (approval && approval.kind === "ACTION" && approval.status === "APPROVED") {
+    return "tools";
+  }
+  return "model";
 }
 
 // Tools node: runs the requested tool calls via the LangGraph ToolNode and
@@ -194,16 +262,52 @@ async function toolsExecutionNode(state, runtimeConfig) {
   const toolCalls =
     isAIMessage(last) && Array.isArray(last.tool_calls) ? last.tool_calls : [];
 
-  if (toolCalls.length > 0) {
-    console.log(
-      `[agent] executing ${toolCalls.length} tool call(s) for chat ${state.chatId}: ${toolCalls.map((c) => c.name).join(", ")}`,
-    );
+  if (toolCalls.length === 0) {
+    return {};
   }
+
+  // Split the round: gated calls are deferred behind an explicit user approval
+  // (or executed directly when a resume carries their approval id), everything
+  // else runs now.
+  const bypass = new Set(state.bypassToolCallIds || []);
+  const gated = toolCalls.filter((call) => isGatedTool(call.name) && !bypass.has(call.id));
+  const runnable = toolCalls.filter((call) => !gated.includes(call));
+
+  if (gated.length > 0) {
+    const deferred = gated[0];
+    // Only the first gated call of the round becomes the approval; any others
+    // are dropped unexecuted (their result is never faked) and are re-decided
+    // by the model after the user responds.
+    let argsJson = null;
+    try {
+      argsJson = JSON.stringify(deferred.args ?? {});
+    } catch {
+      argsJson = null;
+    }
+
+    await createApproval({
+      userId: state.userId,
+      chatId: state.chatId,
+      botId: state.botId,
+      aiJobId: state.aiJobId,
+      kind: "ACTION",
+      question: describeGatedAction(deferred),
+      toolName: deferred.name,
+      toolCallId: deferred.id,
+      args: argsJson,
+    });
+  }
+
+  console.log(
+    `[agent] executing ${runnable.length} of ${toolCalls.length} tool call(s) for chat ${state.chatId}: ${
+      runnable.map((c) => c.name).join(", ") || "(none)"
+    }${gated.length ? ` (deferred for approval: ${gated.map((c) => c.name).join(", ")})` : ""}`,
+  );
 
   const started = new Map();
 
   await Promise.all(
-    toolCalls.map(async (call) => {
+    runnable.map(async (call) => {
       const startedAt = new Date();
       let recordId = null;
       try {
@@ -232,7 +336,22 @@ async function toolsExecutionNode(state, runtimeConfig) {
     }),
   );
 
-  const result = await toolNode.invoke(state, runtimeConfig);
+  // When calls were deferred, ToolNode must only see the runnable subset: a
+  // filtered copy of the last AI message is appended purely for execution. It
+  // never reaches the model because the pending approval ends the run below.
+  const toolNodeState =
+    gated.length > 0
+      ? {
+          ...state,
+          messages: [
+            ...state.messages,
+            new AIMessage({ content: last.content, tool_calls: runnable }),
+          ],
+        }
+      : state;
+
+  const result =
+    runnable.length > 0 ? await toolNode.invoke(toolNodeState, runtimeConfig) : { messages: [] };
   const toolMessages = Array.isArray(result?.messages) ? result.messages : [];
 
   await Promise.all(
@@ -266,17 +385,23 @@ async function toolsExecutionNode(state, runtimeConfig) {
     }),
   );
 
-  return result;
+  // Whether the pause was raised by ask_user or by the sensitive-action gate,
+  // the run stops here; the user's response re-enters the graph through the
+  // resume path with this approval id as the marker.
+  const pending = await hasPendingApproval(state.chatId);
+
+  return { ...result, pendingApprovalId: pending ? pending.id : null };
 }
 
-// START -> model -> (tools -> model | finalize | END). Compiled once at load.
+// START -> (model | resumed ACTION -> tools) -> (tools -> model | END).
+// Compiled once at load.
 const agentGraph = new StateGraph(AgentState)
   .addNode("model", modelNode)
   .addNode("tools", toolsExecutionNode)
   .addNode("finalize", finalizeNode)
-  .addEdge(START, "model")
+  .addConditionalEdges(START, routeStart, ["model", "tools"])
   .addConditionalEdges("model", routeAfterModel, ["tools", "finalize", END])
-  .addEdge("tools", "model")
+  .addConditionalEdges("tools", routeAfterTools, ["model", END])
   .addEdge("finalize", END)
   .compile();
 
@@ -288,6 +413,60 @@ function extractFinalResponse(messages) {
     }
   }
   return "";
+}
+
+// Rebuild the working message list for a resumed run: system prompt + stored
+// history (minus the user's approval response, which is re-fed as the deferred
+// tool result) + the synthetic assistant tool call being resumed + its result.
+// An APPROVED ACTION deliberately gets no ToolMessage here — the graph starts
+// at the tools node so the stored call executes for real.
+function buildResumeMessages(state) {
+  const approval = state.resumeApproval;
+  const isAction = approval.kind === "ACTION";
+  const excludeIds = new Set([approval.responseMessageId].filter(Boolean));
+
+  const messages = [
+    new SystemMessage(
+      buildSystemPrompt(state.botJob, state.botInstructions, state.participants, state.botId),
+    ),
+    ...historyToMessages(state.conversationHistory, excludeIds),
+  ];
+
+  const toolCallId = approval.toolCallId || `resume-${approval.id}`;
+  const args = isAction
+    ? safeParseArgs(approval.args)
+    : {
+        question: approval.question,
+        options: String(approval.options || "").split("\n").filter(Boolean),
+      };
+
+  messages.push(
+    new AIMessage({
+      content: "",
+      tool_calls: [
+        { type: "tool_call", name: isAction ? approval.toolName : "ask_user", args, id: toolCallId },
+      ],
+    }),
+  );
+
+  if (!isAction) {
+    // QUESTION: the human's answer IS the tool result the model is waiting on.
+    messages.push(
+      new ToolMessage({ tool_call_id: toolCallId, content: approval.response ?? "" }),
+    );
+  } else if (approval.status === "REJECTED") {
+    // Rejected action: the model is told the truth and must pick another route.
+    messages.push(
+      new ToolMessage({
+        tool_call_id: toolCallId,
+        content: `The user rejected this action.${
+          approval.response ? ` Their note: ${approval.response}` : ""
+        }`,
+      }),
+    );
+  }
+
+  return messages;
 }
 
 // A per-request budget shared across the whole handoff chain so that limits
@@ -315,35 +494,54 @@ async function invokeGraph({
   depth = 0,
   budget,
   signal,
+  aiJobId = null,
+  resumeApproval = null,
+  maxToolCalls = null,
 }) {
-  const result = await agentGraph.invoke(
-    {
+  const toolBudget = Number(maxToolCalls) || DEFAULT_MAX_TOOL_CALLS;
+
+  const input = {
+    userId,
+    chatId,
+    botId,
+    botJob,
+    botInstructions,
+    conversationHistory,
+    message,
+    participants,
+    aiJobId,
+    resumeApproval,
+    maxToolCalls: toolBudget,
+    pendingApprovalId: null,
+    bypassToolCallIds:
+      resumeApproval &&
+      resumeApproval.kind === "ACTION" &&
+      resumeApproval.status === "APPROVED"
+        ? [resumeApproval.toolCallId].filter(Boolean)
+        : [],
+  };
+
+  // A resume seeds the message list up front (system + history + the deferred
+  // call/answer pair); a fresh turn lets modelNode seed it on the first pass.
+  if (resumeApproval) {
+    input.messages = buildResumeMessages(input);
+  }
+
+  return agentGraph.invoke(input, {
+    signal,
+    recursionLimit: toolBudget * 2 + 20,
+    configurable: {
       userId,
       chatId,
       botId,
-      botJob,
-      botInstructions,
-      conversationHistory,
-      message,
+      aiJobId,
       participants,
-    },
-    {
+      depth,
+      budget,
+      runTeammate: runTeammateAgent,
       signal,
-      recursionLimit: GRAPH_RECURSION_LIMIT,
-      configurable: {
-        userId,
-        chatId,
-        botId,
-        participants,
-        depth,
-        budget,
-        runTeammate: runTeammateAgent,
-        signal,
-      },
     },
-  );
-
-  return extractFinalResponse(result.messages);
+  });
 }
 
 async function safelyFinishHandoff(id, status, result, error) {
@@ -392,7 +590,7 @@ async function runTeammateAgent({
   activityHandoff({ chatId, botId: fromBotId, to: toBot.name, task, phase: "start" });
 
   try {
-    const result = await invokeGraph({
+    const state = await invokeGraph({
       userId,
       chatId,
       botId: toBot.id,
@@ -405,6 +603,19 @@ async function runTeammateAgent({
       budget,
       signal,
     });
+
+    if (state.pendingApprovalId) {
+      // The delegated run paused on a human approval. The handoff cannot
+      // complete now, so it is failed honestly (the caller's catch persists
+      // that) and the parent round — which checks for the same pending
+      // approval right after its tools — stops as well. After the user
+      // answers, the resumed model re-issues this task with the answer.
+      throw new Error(
+        "The delegated task paused to ask the user a question and cannot continue until they answer.",
+      );
+    }
+
+    const result = extractFinalResponse(state.messages);
 
     if (!result || result.trim().length === 0) {
       throw new Error("The teammate returned an empty response.");
@@ -445,13 +656,16 @@ export async function generateAgentResponse({
   message,
   participants = [],
   timeoutMs = config.handoffs.timeoutMs,
+  aiJobId = null,
+  resumeApproval = null,
+  maxToolCalls = null,
 }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const budget = createExecutionBudget();
 
   try {
-    return await invokeGraph({
+    const state = await invokeGraph({
       userId,
       chatId,
       botId,
@@ -463,7 +677,19 @@ export async function generateAgentResponse({
       depth: 0,
       budget,
       signal: controller.signal,
+      aiJobId,
+      resumeApproval,
+      maxToolCalls,
     });
+
+    // A paused run reports the approval that stopped it so the caller can
+    // surface the question and park the turn/job instead of finishing it.
+    let pendingApproval = null;
+    if (state.pendingApprovalId) {
+      pendingApproval = await hasPendingApproval(chatId);
+    }
+
+    return { text: extractFinalResponse(state.messages), pendingApproval };
   } finally {
     clearTimeout(timer);
   }

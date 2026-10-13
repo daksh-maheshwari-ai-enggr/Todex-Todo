@@ -19,8 +19,9 @@ model User {
   messages    Message[] @relation("UserMessages")
   todos       Todo[]    @relation("UserTodos")
   toolExecutions ToolExecution[] @relation("UserToolExecutions")
-  handoffs    Handoff[] @relation("UserHandoffs")
+  handoffs    Handoff[]  @relation("UserHandoffs")
   aiJobs      AiJob[]  @relation("UserAiJobs")
+  approvals   ApprovalRequest[] @relation("UserApprovals")
 
   @@index([email])
 }
@@ -42,6 +43,7 @@ model Bot {
   handoffsFrom Handoff[] @relation("HandoffFrom")
   handoffsTo   Handoff[] @relation("HandoffTo")
   aiJobs       AiJob[]  @relation("BotAiJobs")
+  approvals    ApprovalRequest[] @relation("BotApprovals")
 
   @@index([userId])
   @@index([id])
@@ -60,7 +62,8 @@ model Chat {
   toolExecutions ToolExecution[] @relation("ChatToolExecutions")
   participants ChatParticipant[] @relation("ChatParticipants")
   handoffs    Handoff[] @relation("ChatHandoffs")
-  aiJobs      AiJob[]  @relation("ChatAiJobs")
+  aiJobs      AiJob[] @relation("ChatAiJobs")
+  approvals   ApprovalRequest[] @relation("ChatApprovals")
 
   @@index([userId])
   @@index([botId])
@@ -189,6 +192,7 @@ model Handoff {
 enum AiJobStatus {
   QUEUED
   RUNNING
+  WAITING_FOR_USER
   SUCCEEDED
   FAILED
   CANCELLED
@@ -219,6 +223,13 @@ model AiJob {
   // Message rows themselves remain the authoritative chat record.
   userMessageId      String?     @db.VarChar(200)
   assistantMessageId String?     @db.VarChar(200)
+  // Human-in-the-loop pause bookkeeping: the approval that paused this run and
+  // when it started waiting. Null while the run is executing normally.
+  lastApprovalId     String?     @db.VarChar(200)
+  waitSince          DateTime?
+  // Number of completed tool rounds in the current run (Phase B step budget).
+  stepCount          Int         @default(0)
+  approvals          ApprovalRequest[] @relation("JobApprovals")
   // Bounded success result / sanitized failure message (never a stack trace).
   result             String?     @db.VarChar(4000)
   error              String?     @db.VarChar(2000)
@@ -232,4 +243,59 @@ model AiJob {
   @@index([chatId])
   @@index([botId])
   @@index([status])
+}
+
+// A human-in-the-loop pause raised by a running agent turn.
+//
+// The agent stops its tool loop when one of these exists in PENDING state and
+// the run is resumed from here once the owner responds: a QUESTION approval
+// carries the ask_user tool's question/options and stores the answer as the
+// deferred tool result; an ACTION approval carries a deferred sensitive tool
+// call (toolName/args/toolCallId) that runs only after explicit approval.
+enum ApprovalKind {
+  QUESTION
+  ACTION
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+model ApprovalRequest {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation("UserApprovals", fields: [userId], references: [id], onDelete: Cascade)
+  chatId    String
+  chat      Chat          @relation("ChatApprovals", fields: [chatId], references: [id], onDelete: Cascade)
+  botId     String?
+  bot       Bot?          @relation("BotApprovals", fields: [botId], references: [id], onDelete: SetNull)
+  // The paused run. Null for a synchronous respond turn (no job row exists).
+  aiJobId   String?
+  aiJob     AiJob?        @relation("JobApprovals", fields: [aiJobId], references: [id], onDelete: SetNull)
+  kind      ApprovalKind
+  // What the user sees in the approval card.
+  question  String        @db.VarChar(2000)
+  options   String?       @db.VarChar(2000)
+  // ACTION approvals: the deferred tool call, resumed only after approval.
+  toolName  String?       @db.VarChar(100)
+  toolCallId String?      @db.VarChar(200)
+  args      String?       @db.VarChar(4000)
+  // Display links: the assistant message showing the question, and the user's
+  // answer message (excluded from the resumed model context because the answer
+  // is re-fed as the deferred tool result instead).
+  assistantMessageId String? @db.VarChar(200)
+  responseMessageId  String? @db.VarChar(200)
+  status    ApprovalStatus @default(PENDING)
+  response  String?       @db.VarChar(4000)
+  createdAt DateTime      @default(now())
+  resolvedAt DateTime?
+  expiresAt DateTime?
+
+  @@index([userId, status])
+  @@index([chatId, status])
+  @@index([aiJobId])
 }

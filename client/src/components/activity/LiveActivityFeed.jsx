@@ -8,6 +8,7 @@ import {
   Loader2,
   Play,
   Radio,
+  ShieldQuestion,
   Sparkles,
   Wrench,
   X,
@@ -31,6 +32,8 @@ const EVENT_META = {
   "handoff.finished": { icon: ArrowRightLeft, tone: "success", label: "Handoff" },
   "task.completed": { icon: CheckCheck, tone: "success", label: "Task" },
   "task.blocked": { icon: AlertTriangle, tone: "error", label: "Task" },
+  "approval.pending": { icon: ShieldQuestion, tone: "running", label: "Approval" },
+  "approval.resolved": { icon: Check, tone: "success", label: "Approval" },
 };
 
 const CONNECTION = {

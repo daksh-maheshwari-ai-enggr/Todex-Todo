@@ -96,6 +96,27 @@ export const config = {
     // How long to wait for a cold bootstrap (package install) before giving up.
     bootstrapTimeoutMs: Number(process.env.BROWSER_BOOTSTRAP_TIMEOUT_MS) || 900000,
   },
+  // Human-in-the-loop approvals (ROADMAP.md Phase A). The agent pauses its tool
+  // loop when an ApprovalRequest is PENDING for the chat and resumes when the
+  // owner responds.
+  approvals: {
+    // How long a pending approval stays answerable before it expires.
+    ttlMs: Number(process.env.APPROVAL_TTL_MS) || 24 * 60 * 60 * 1000,
+    // Tool names that always require explicit approval before they run.
+    // Comma-separated, empty by default: the ask_user tool plus the prompt's
+    // "ask before irreversible actions" policy cover the rest. Enable e.g.
+    // APPROVAL_GATED_TOOLS=sandbox_execute_command to hard-gate the shell.
+    gatedTools: String(process.env.APPROVAL_GATED_TOOLS || "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  },
+  agent: {
+    // Per-turn tool-call budgets. Chat turns stay tight for snappy replies;
+    // background jobs get room for real multi-step tasks (bookings, research).
+    maxToolCallsSync: Number(process.env.AGENT_MAX_TOOL_CALLS_SYNC) || 8,
+    maxToolCallsJob: Number(process.env.AGENT_MAX_TOOL_CALLS_JOB) || 40,
+  },
   search: {
     // Reusable web research provider. Deliberately optional: with no key the
     // search tool reports that it is not configured instead of pretending.

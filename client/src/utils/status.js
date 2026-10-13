@@ -30,10 +30,12 @@ export function toneClasses(tone) {
   return TONES[tone] ?? TONES.neutral;
 }
 
-// Application job lifecycle: QUEUED | RUNNING | SUCCEEDED | FAILED | CANCELLED
+// Application job lifecycle:
+// QUEUED | RUNNING | WAITING_FOR_USER | SUCCEEDED | FAILED | CANCELLED
 const JOB_STATUS = {
   QUEUED: { label: "Queued", tone: "idle" },
   RUNNING: { label: "Running", tone: "running" },
+  WAITING_FOR_USER: { label: "Waiting for you", tone: "running" },
   SUCCEEDED: { label: "Succeeded", tone: "success" },
   FAILED: { label: "Failed", tone: "error" },
   CANCELLED: { label: "Cancelled", tone: "neutral" },
@@ -61,6 +63,8 @@ export function executionStatus(status) {
 }
 
 // Active job states are the ones worth polling and worth offering a cancel for.
+// WAITING_FOR_USER counts as active: the run is parked on an approval and will
+// continue (or be cancelled) — it is neither finished nor silently stuck.
 export function isJobActive(status) {
-  return status === "QUEUED" || status === "RUNNING";
+  return status === "QUEUED" || status === "RUNNING" || status === "WAITING_FOR_USER";
 }

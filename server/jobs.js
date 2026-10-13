@@ -23,12 +23,16 @@ const MAX_LIMIT = 100;
 
 // A job is "active" until it reaches a terminal state. Terminal states are
 // final: no later update (retry, hook or read-time reconciliation) may move a
-// finished job back into an active state.
-const ACTIVE_STATUSES = ["QUEUED", "RUNNING"];
+// finished job back into an active state. WAITING_FOR_USER is active-but-parked:
+// the run stopped on a human approval and only the approval response (or a
+// cancellation) may move it again.
+const ACTIVE_STATUSES = ["QUEUED", "RUNNING", "WAITING_FOR_USER"];
 const TERMINAL_STATUSES = ["SUCCEEDED", "FAILED", "CANCELLED"];
 
-// Which states a job may safely be cancelled from.
-const CANCELLABLE_STATUSES = ["QUEUED", "RUNNING"];
+// Which states a job may safely be cancelled from. A job waiting on an approval
+// is cancellable too — its Trigger run has already ended, so cancellation is
+// handled locally (see backgroundJobs.cancelBackgroundJob).
+const CANCELLABLE_STATUSES = ["QUEUED", "RUNNING", "WAITING_FOR_USER"];
 
 // Ordering of the active states so reconciliation can never move a job
 // backwards. Trigger.dev reports QUEUED again while a run is in retry backoff
@@ -80,6 +84,11 @@ export function isCancellableStatus(status) {
 //   * An active job never moves backwards, so a run that reports a queueing
 //     status again cannot undo a started job.
 export function resolveAppStatus(currentStatus, runStatus) {
+  // A parked job (waiting on the human) is never moved by run reconciliation:
+  // its Trigger run ended normally on purpose. Only the approval response
+  // (RUNNING again) or an explicit cancellation may change it.
+  if (currentStatus === "WAITING_FOR_USER") return "WAITING_FOR_USER";
+
   const mapped = RUN_STATUS_TO_APP[runStatus] ?? null;
   if (!mapped) return null;
 
@@ -147,6 +156,10 @@ export function toPublicJob(job) {
     attemptCount: job.attemptCount,
     maxAttempts: job.maxAttempts,
     assistantMessageId: job.assistantMessageId,
+    // The approval a WAITING_FOR_USER job is parked on, so the UI can link
+    // straight to the card that unblocks it.
+    waitingForApprovalId:
+      job.status === "WAITING_FOR_USER" ? job.lastApprovalId ?? null : null,
     createdAt: job.createdAt,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
@@ -245,6 +258,23 @@ export async function attachRun({ jobId, runId, status = "RUNNING" }) {
   });
 }
 
+// Record a resumption dispatch: the approval was answered and a new run now
+// exists. Keeps attemptCount/startedAt bookkeeping from the original dispatch
+// and clears the waiting markers.
+export async function attachResumeRun({ jobId, runId }) {
+  return prisma.aiJob.update({
+    where: { id: jobId },
+    data: {
+      runId,
+      status: "RUNNING",
+      runStatus: null,
+      waitSince: null,
+      error: null,
+      completedAt: null,
+    },
+  });
+}
+
 // A dispatch that threw left no run behind. Record it as a real failure so the
 // job is never left silently claiming to be queued.
 export async function markDispatchFailure({ jobId, error }) {
@@ -271,6 +301,7 @@ export async function markJobRunning({ jobId, attemptCount, runStatus = null }) 
       ...(attemptCount ? { attemptCount } : {}),
       ...(runStatus ? { runStatus } : {}),
       startedAt: job.startedAt ?? new Date(),
+      waitSince: null,
     },
   });
 }
@@ -382,6 +413,7 @@ export async function listJobsForUser(userId, { limit, cursor, status } = {}) {
       attemptCount: true,
       maxAttempts: true,
       assistantMessageId: true,
+      lastApprovalId: true,
       createdAt: true,
       startedAt: true,
       completedAt: true,
